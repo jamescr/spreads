@@ -37,25 +37,26 @@ from spreads.util import (abstractclassmethod, find_in_path, SpreadsException,
 logger = logging.getLogger("spreads.plugin")
 
 
-class SpreadsNamedExtensionManager(NamedExtensionManager):
-    """ Custom extension manager for spreads.
-
-    stevedore's NamedExtensionmanger does not give us the Exception that caused
-    a plugin to fail at initialization. This derived class throws the original
-    exception instead of logging it.
-    """
-    def _load_plugins(self, invoke_on_load, invoke_args, invoke_kwds):
-        extensions = []
-        for ep in self._find_entry_points(self.namespace):
-            stevedore.LOG.debug('found extension %r', ep)
-            ext = self._load_one_plugin(ep,
-                                        invoke_on_load,
-                                        invoke_args,
-                                        invoke_kwds,
-                                        )
-            if ext:
-                extensions.append(ext)
-        return extensions
+# -> use stevedore's extensionManager
+#class SpreadsNamedExtensionManager(NamedExtensionManager):
+#    """ Custom extension manager for spreads.
+#
+#    stevedore's NamedExtensionmanger does not give us the Exception that caused
+#    a plugin to fail at initialization. This derived class throws the original
+#    exception instead of logging it.
+#    """
+#    def _load_plugins(self, invoke_on_load, invoke_args, invoke_kwds):
+#        extensions = []
+#        for ep in self._find_entry_points(self.namespace):
+#            stevedore.LOG.debug('found extension %r', ep)
+#            ext = self._load_one_plugin(ep,
+#                                        invoke_on_load,
+#                                        invoke_args,
+#                                        invoke_kwds,
+#                                        )
+#            if ext:
+#                extensions.append(ext)
+#        return extensions
 
 
 class SpreadsPlugin(object):
@@ -286,12 +287,14 @@ def get_pluginmanager():
     if _pluginmanager:
         return _pluginmanager
     logger.debug("Creating plugin manager")
-    _pluginmanager = SpreadsNamedExtensionManager(
+#    _pluginmanager = SpreadsNamedExtensionManager(
+    _pluginmanager = ExtensionManager(
         namespace='spreadsplug.hooks',
-        names=spreads.config['plugins'].as_str_seq(),
+        #names=spreads.config['plugins'].as_str_seq(),
         invoke_on_load=True,
-        invoke_args=[spreads.config],
-        name_order=True)
+        invoke_args=[spreads.config])
+        #invoke_args=[spreads.config],
+        #name_order=True)
     return _pluginmanager
 
 
