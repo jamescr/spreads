@@ -191,10 +191,10 @@ def wizard(args, devices=None):
 def setup_parser():
     def _add_device_arguments(name, parser):
         try:
-			for dev in get_devices():
-				dev.add_arguments(name, parser)
+            for dev in get_devices():
+                dev.add_arguments(name, parser)
         except:
-			return
+            return
     pluginmanager = get_pluginmanager()
     rootparser = argparse.ArgumentParser(
         description="Scanning Tool for  DIY Book Scanner")
