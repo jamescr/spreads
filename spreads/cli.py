@@ -195,6 +195,7 @@ def setup_parser():
                 dev.add_arguments(name, parser)
         except:
             return
+
     pluginmanager = get_pluginmanager()
     rootparser = argparse.ArgumentParser(
         description="Scanning Tool for  DIY Book Scanner")
