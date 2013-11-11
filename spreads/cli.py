@@ -191,12 +191,10 @@ def wizard(args, devices=None):
 def setup_parser():
     def _add_device_arguments(name, parser):
         try:
-			print("ACAAAAAAAAA, linea 194, cli.py")
 			for dev in get_devices():
 				dev.add_arguments(name, parser)
         except:
-            return
-
+			return
     pluginmanager = get_pluginmanager()
     rootparser = argparse.ArgumentParser(
         description="Scanning Tool for  DIY Book Scanner")
@@ -218,14 +216,14 @@ def setup_parser():
     capture_parser = subparsers.add_parser(
         'capture', help="Start the capturing workflow")
     capture_parser.set_defaults(func=capture)
-#    # Add arguments from plugins
-#    for parser in (capture_parser, wizard_parser):
-#        parser.add_argument("--no-parallel-capture", dest="parallel_capture",
-#            action="store_false", default=True,
-#            help="Do not trigger capture on multiple devices at once.")
-#        pluginmanager.map(lambda x, y, z: x.plugin.add_arguments(y, z),
-#                          'capture', parser)
-#        _add_device_arguments('capture', parser)
+    # Add arguments from plugins
+    for parser in (capture_parser, wizard_parser):
+        parser.add_argument("--no-parallel-capture", dest="parallel_capture",
+            action="store_false", default=True,
+            help="Do not trigger capture on multiple devices at once.")
+        pluginmanager.map(lambda x, y, z: x.plugin.add_arguments(y, z),
+                          'capture', parser)
+        _add_device_arguments('capture', parser)
 
     download_parser = subparsers.add_parser(
         'download', help="Download scanned images.")
@@ -239,11 +237,11 @@ def setup_parser():
             "--keep", "-k", dest="keep", action="store_true",
             help="Keep files on devices after download")
     download_parser.set_defaults(func=download)
-#    # Add arguments from plugins
-#    for parser in (download_parser, wizard_parser):
-#        pluginmanager.map(lambda x, y, z: x.plugin.add_arguments(y, z),
-#                          'download', parser)
-#        _add_device_arguments('download', parser)
+    # Add arguments from plugins
+    for parser in (download_parser, wizard_parser):
+        pluginmanager.map(lambda x, y, z: x.plugin.add_arguments(y, z),
+                          'download', parser)
+        _add_device_arguments('download', parser)
 
     postprocess_parser = subparsers.add_parser(
         'postprocess',
@@ -254,10 +252,10 @@ def setup_parser():
         "--jobs", "-j", dest="jobs", type=int, default=None,
         metavar="<int>", help="Number of concurrent processes")
     postprocess_parser.set_defaults(func=postprocess)
- #   # Add arguments from plugins
- #   for parser in (postprocess_parser, wizard_parser):
- #       pluginmanager.map(lambda x, y, z: x.plugin.add_arguments(y, z),
- #                         'postprocess', parser)
+    # Add arguments from plugins
+    for parser in (postprocess_parser, wizard_parser):
+        pluginmanager.map(lambda x, y, z: x.plugin.add_arguments(y, z),
+                          'postprocess', parser)
 
     output_parser = subparsers.add_parser(
         'output',
@@ -266,12 +264,12 @@ def setup_parser():
         "path", help="Path where scanned and postprocessed images are stored")
     output_parser.set_defaults(func=output)
     # Add arguments from plugins
-#    for parser in (download_parser, wizard_parser):
-#        pluginmanager.map(lambda x, y, z: x.plugin.add_arguments(y, z),
-#                          'output', parser)
+    for parser in (download_parser, wizard_parser):
+        pluginmanager.map(lambda x, y, z: x.plugin.add_arguments(y, z),
+                          'output', parser)
 
-#    pluginmanager.map(lambda x, y: x.plugin.add_command_parser(y),
-#                      subparsers)
+    pluginmanager.map(lambda x, y: x.plugin.add_command_parser(y),
+                      subparsers)
     return rootparser
 
 
