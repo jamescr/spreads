@@ -1,26 +1,43 @@
+# -*- coding: utf-8 -*-
+
+# Copyright (C) 2014 Johannes Baiter <johannes.baiter@gmail.com>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
 import logging
 
 from PySide import QtGui
 
-import spreads
-from spreads.plugin import HookPlugin, get_devices
+from spreads.plugin import HookPlugin, SubcommandHookMixin
 import gui
 import gui_rc
 
 logger = logging.getLogger('spreadsplug.gui')
 
 
-class GuiCommand(HookPlugin):
+class GuiCommand(HookPlugin, SubcommandHookMixin):
     @classmethod
     def add_command_parser(cls, rootparser):
         guiparser = rootparser.add_parser(
             'gui', help="Start the GUI wizard")
-        guiparser.set_defaults(func=wizard)
+        guiparser.set_defaults(subcommand=GuiCommand.wizard)
 
+    @staticmethod
+    def wizard(config):
+        logger.debug("Starting GUI")
+        app = QtGui.QApplication([])
 
-def wizard(args):
-    logger.debug("Starting GUI")
-    app = QtGui.QApplication([])
-    wizard = gui.SpreadsWizard(spreads.config, get_devices())
-    wizard.show()
-    app.exec_()
+        wizard = gui.SpreadsWizard(config)
+        wizard.show()
+        app.exec_()

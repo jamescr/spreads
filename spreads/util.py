@@ -1,23 +1,19 @@
 # -*- coding: utf-8 -*-
 
-# Copyright (c) 2013 Johannes Baiter. All rights reserved.
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
+# Copyright (C) 2014 Johannes Baiter <johannes.baiter@gmail.com>
 #
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
 #
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-# THE SOFTWARE.
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 """ Various utility functions.
 """
@@ -26,9 +22,10 @@ from __future__ import division, unicode_literals
 
 import abc
 import itertools
+import logging
 import os
-from logging import StreamHandler
 
+import blinker
 from colorama import Fore, Back, Style
 
 
@@ -55,6 +52,18 @@ def find_in_path(name):
     return name in itertools.chain(*tuple(os.listdir(x)
                                    for x in os.environ.get('PATH').split(':')
                                    if os.path.exists(x)))
+
+
+def check_futures_exceptions(futures):
+    if any(x.exception() for x in futures):
+        exc = next(x for x in futures if x.exception()).exception()
+        raise exc
+
+
+def get_free_space(path):
+    # TODO: Add path for windows
+    st = os.statvfs(unicode(path))
+    return (st.f_bavail * st.f_frsize)
 
 
 class _instancemethodwrapper(object):
@@ -102,8 +111,8 @@ class abstractclassmethod(_classmethod):
         super(abstractclassmethod, self).__init__(func)
 
 
-class ColourStreamHandler(StreamHandler):
-    """ A colorized output SteamHandler
+class ColourStreamHandler(logging.StreamHandler):
+    """ A colorized output StreamHandler
     Kudos to Leigh MacDonald:
     http://leigh.cudd.li/article/Cross_Platform_Colorized_Logger_Output_Using_Pythons_logging_Module_And_Colorama
     """
@@ -146,3 +155,15 @@ class ColourStreamHandler(StreamHandler):
             raise
         except:
             self.handleError(record)
+
+
+class EventHandler(logging.Handler):
+    signals = blinker.Namespace()
+    on_log_emit = signals.signal('logrecord', doc="""\
+    Sent when a log record was emitted.
+
+    :keyword :class:`logging.LogRecord` record: the LogRecord
+    """)
+
+    def emit(self, record):
+        self.on_log_emit.send(record=record)

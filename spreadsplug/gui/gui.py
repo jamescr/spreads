@@ -1,18 +1,31 @@
+# -*- coding: utf-8 -*-
+
+# Copyright (C) 2014 Johannes Baiter <johannes.baiter@gmail.com>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
 import logging
-import os
 import time
 
-import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from PySide import QtCore, QtGui
-from PIL import Image
 
-import spreads
 import spreads.workflow as workflow
-import spreads.util as util
-from spreads.plugin import get_devices, get_pluginmanager
 
 import gui_rc
+
+logger = logging.getLogger('spreadsplug.gui')
 
 
 class LogBoxHandler(logging.Handler):
@@ -30,7 +43,11 @@ class LogBoxHandler(logging.Handler):
 
     def emit(self, record):
         # Play a warning sound if something has gone wrong
-        self.sig.emit(self.format(record))
+        try:
+            self.sig.emit(self.format(record))
+        except:
+            self.handleError(record)
+
         if record.levelname in ('ERROR', 'CRITICAL', 'WARNING'):
             QtGui.QApplication.beep()
 
@@ -46,21 +63,19 @@ class LogBoxFormatter(logging.Formatter):
 
     def format(self, record):
         levelname = record.levelname
-        return self.LEVELS[levelname].format(record.message)
+        return self.LEVELS[levelname].format(record.msg)
 
 
 class SpreadsWizard(QtGui.QWizard):
-    def __init__(self, config, devices, parent=None):
+    def __init__(self, config, parent=None):
         super(SpreadsWizard, self).__init__(parent)
 
-        self.devices = devices
+        self.config = config
 
         self.addPage(IntroPage())
         self.addPage(CapturePage())
-        self.addPage(DownloadPage())
         self.addPage(PostprocessPage())
         self.addPage(OutputPage())
-        self.addPage(FinishPage())
 
         self.setPixmap(QtGui.QWizard.WatermarkPixmap,
                        QtGui.QPixmap(':/pixmaps/monk.png'))
@@ -75,60 +90,50 @@ class SpreadsWizard(QtGui.QWizard):
         self.setButtonLayout(button_layout)
 
         self.setWindowTitle("Spreads Wizard")
+        self.setFixedWidth(700)
 
 
 class IntroPage(QtGui.QWizardPage):
     def initializePage(self):
-        self.wizard().active_plugins = get_pluginmanager().names()
+        wizard = self.wizard()
         self.setTitle("Welcome!")
 
         intro_label = QtGui.QLabel(
             "This wizard will guide you through the digitization workflow. "
         )
+        intro_label.setWordWrap(True)
 
         dirpick_layout = QtGui.QHBoxLayout()
         self.line_edit = QtGui.QLineEdit()
+        self.line_edit.textChanged.connect(self.completeChanged)
         browse_btn = QtGui.QPushButton("Browse")
         dirpick_layout.addWidget(self.line_edit)
         dirpick_layout.addWidget(browse_btn)
         browse_btn.clicked.connect(self.show_filepicker)
 
-        form_layout = QtGui.QFormLayout()
-
-        self.keep_box = QtGui.QCheckBox("Keep files on devices")
-        form_layout.addRow(self.keep_box)
-
-        self.even_device = None
-        if ('combine' in self.wizard().active_plugins
-                or 'autorotate' in self.wizard().active_plugins):
-            self.even_device = QtGui.QComboBox()
-            self.even_device.addItem("Left")
-            self.even_device.addItem("Right")
-            self.even_device.setCurrentIndex(0)
-            form_layout.addRow("Device for even pages", self.even_device)
-
-        self.st_auto = None
-        self.st_detection = None
-        if 'scantailor' in self.wizard().active_plugins:
-            self.st_auto = QtGui.QCheckBox("Don't Inspect ScanTailor"
-                                           " configuration")
-            form_layout.addRow(self.st_auto)
-            self.st_detection = QtGui.QComboBox()
-            self.st_detection.addItem("Content")
-            self.st_detection.addItem("Page")
-            self.st_detection.setCurrentIndex(0)
-            form_layout.addRow("ScanTailor layout mode", self.st_detection)
-
-        self.ocr_lang = None
-        if 'tesseract' in self.wizard().active_plugins:
-            langs = (subprocess.check_output(["tesseract", "--list-langs"],
-                                             stderr=subprocess.STDOUT)
-                     .split("\n")[1:-1])
-            self.ocr_lang = QtGui.QComboBox()
-            for lang in langs:
-                self.ocr_lang.addItem(lang)
-            self.ocr_lang.setCurrentIndex(0)
-            form_layout.addRow("OCR language", self.ocr_lang)
+        self.stack_widget = QtGui.QStackedWidget()
+        page_combobox = QtGui.QComboBox()
+        page_combobox.activated.connect(self.stack_widget.setCurrentIndex)
+        #QtCore.QObject.connect(page_combobox, SIGNAL("activated(int)"),
+        #        self.stack_widget, SLOT("setCurrentIndex(int)"))
+        # Add configuration widgets from plugins
+        self.plugin_widgets = {}
+        for name, tmpl in wizard.config.templates.iteritems():
+            if not tmpl:
+                continue
+            page = QtGui.QGroupBox()
+            layout = QtGui.QFormLayout()
+            widgets = self._get_plugin_config_widgets(tmpl)
+            self.plugin_widgets[name] = widgets
+            for label, widget in widgets.values():
+                # We don't need a label for QCheckBoxes
+                if isinstance(widget, QtGui.QCheckBox):
+                    layout.addRow(widget)
+                else:
+                    layout.addRow(label, widget)
+            page.setLayout(layout)
+            self.stack_widget.addWidget(page)
+            page_combobox.addItem(name.title())
 
         main_layout = QtGui.QVBoxLayout()
         main_layout.addWidget(intro_label)
@@ -138,9 +143,53 @@ class IntroPage(QtGui.QWizardPage):
         )
         main_layout.addLayout(dirpick_layout)
         main_layout.addSpacing(30)
-        main_layout.addLayout(form_layout)
+        main_layout.addWidget(page_combobox)
+        main_layout.addWidget(self.stack_widget)
+        main_layout.setSizeConstraint(QtGui.QLayout.SetNoConstraint)
 
         self.setLayout(main_layout)
+        self.adjustSize()
+
+    def _get_plugin_config_widgets(self, plugin_tmpl):
+        widgets = {}
+        for key, option in plugin_tmpl.items():
+            label = (option.docstring
+                     if not option.docstring is None else key.title())
+            # Do we need a dropdown?
+            if (option.selectable and
+                    any(isinstance(option.value, x) for x in (list, tuple))):
+                widget = QtGui.QComboBox()
+                for each in option.value:
+                    widget.addItem(each)
+                widget.setCurrentIndex(0)
+            # Do we need a checkbox?
+            elif isinstance(option.value, bool):
+                widget = QtGui.QCheckBox(label)
+                widget.setCheckState(QtCore.Qt.Checked
+                                     if option.value
+                                     else QtCore.Qt.Unchecked)
+            elif any(isinstance(option.value, x) for x in (list, tuple)):
+                # NOTE: We skip options with sequences for a value for now,
+                #       as I'm not sure yet how this is best displayed to
+                #       the user...
+                # TODO: Find a way to display this nicely to the user
+                continue
+            # Seems like we need another value...
+            elif isinstance(option.value, int):
+                widget = QtGui.QSpinBox()
+                widget.setMaximum(1024)
+                widget.setMinimum(-1024)
+                widget.setValue(option.value)
+            elif isinstance(option.value, float):
+                widget = QtGui.QDoubleSpinBox()
+                widget.setMaximum(1024.0)
+                widget.setMinimum(-1024.0)
+                widget.setValue(option.value)
+            else:
+                widget = QtGui.QLineEdit()
+                widget.setText(option.value)
+            widgets[key] = (label, widget)
+        return widgets
 
     def show_filepicker(self):
         dialog = QtGui.QFileDialog()
@@ -149,52 +198,82 @@ class IntroPage(QtGui.QWizardPage):
         dialog.exec_()
         self.line_edit.setText(dialog.selectedFiles()[0])
 
+    def isComplete(self):
+        return bool(self.line_edit.text())
+
     def validatePage(self):
-        self.wizard().project_path = self.line_edit.text()
-        if not self.wizard().project_path:
+        wizard = self.wizard()
+        project_path = self.line_edit.text()
+        if not project_path:
             msg_box = QtGui.QMessageBox()
             msg_box.setText("Please select a project directory.")
             msg_box.setIcon(QtGui.QMessageBox.Critical)
             msg_box.exec_()
             return False
 
-        spreads.config['keep'] = self.keep_box.isChecked()
-        if self.even_device and self.even_device.currentText() != 'Left':
-            spreads.config['first_page'] = "right"
-            spreads.config['rotate_inverse'] = True
-        if self.st_auto:
-            spreads.config['autopilot'] = self.st_auto.isChecked()
-        if self.st_detection:
-            spreads.config['page_detection'] = (
-                self.st_detection.currentText().lower() == 'page')
-        if self.ocr_lang:
-            spreads.config['language'] = str(self.ocr_lang.currentText()
-                                             .lower())
+        self._update_config_from_plugin_widgets()
+        wizard.workflow = workflow.Workflow(path=project_path,
+                                            config=wizard.config)
+        wizard.workflow.prepare_capture()
         return True
+
+    def _update_config_from_plugin_widgets(self):
+        config = self.wizard().config
+        for section in config.templates:
+            if not section in self.plugin_widgets:
+                continue
+            logger.debug("Updating config from widgets for plugin {0}"
+                         .format(section))
+            for key in self.plugin_widgets[section]:
+                logger.debug("Trying to set key \"{0}\"".format(key))
+                label, widget = self.plugin_widgets[section][key]
+                if isinstance(widget, QtGui.QComboBox):
+                    idx = widget.currentIndex()
+                    values = config.templates[section][key].value
+                    logger.debug("Setting to \"{0}\"".format(values[idx]))
+                    config[section][key] = values[idx]
+                elif isinstance(widget, QtGui.QCheckBox):
+                    checked = widget.isChecked()
+                    logger.debug("Setting to \"{0}\"".format(checked))
+                    config[section][key] = checked
+                elif any(isinstance(widget, x)
+                         for x in (QtGui.QSpinBox, QtGui.QDoubleSpinBox)):
+                    config[section][key] = widget.value()
+                else:
+                    content = config[section][key] = widget.text()
+                    logger.debug("Setting to \"{0}\"".format(content))
+                    config[section][key] = unicode(content)
 
 
 class CapturePage(QtGui.QWizardPage):
     def initializePage(self):
         self.setTitle("Capturing from devices")
         self.start_time = None
-        self.shot_count = None
+        self.shot_count = 0
+
+        # TODO: Add horizontally scrolling box with thumbnails of all
+        #       previously shot images
+        # TODO: Display last two shot images next to each other
+        # TODO: Add button to retake the last capture
 
         layout = QtGui.QVBoxLayout(self)
         self.status = QtGui.QLabel("Press a capture key (default: Space, B)"
                                    " to begin capturing.")
 
-        previewbox = QtGui.QHBoxLayout()
-        self.left_preview = QtGui.QLabel()
-        self.right_preview = QtGui.QLabel()
-        previewbox.addWidget(self.left_preview)
-        previewbox.addWidget(self.right_preview)
-
-        self.refresh_btn = QtGui.QPushButton("Refresh")
-        self.refresh_btn.clicked.connect(self.update_preview)
-
         self.capture_btn = QtGui.QPushButton("Capture")
         self.capture_btn.clicked.connect(self.doCapture)
         self.capture_btn.setFocus()
+
+        control_layout = QtGui.QHBoxLayout()
+        self.control_odd = QtGui.QLabel()
+        self.control_even = QtGui.QLabel()
+        control_layout.addWidget(self.control_odd)
+        control_layout.addWidget(self.control_even)
+
+        self.retake_btn = QtGui.QPushButton("Retake")
+        self.retake_btn.clicked.connect(self.retakeCapture)
+        self.retake_btn = QtGui.QPushButton("Retake")
+        self.retake_btn.clicked.connect(self.retakeCapture)
 
         self.logbox = QtGui.QTextEdit()
         self.log_handler = LogBoxHandler(self.logbox)
@@ -204,128 +283,66 @@ class CapturePage(QtGui.QWizardPage):
         self.log_handler.sig.connect(self.logbox.append)
 
         layout.addWidget(self.status)
-        layout.addWidget(self.refresh_btn)
-        layout.addLayout(previewbox)
+        layout.addStretch(1)
+        layout.addLayout(control_layout)
         layout.addWidget(self.capture_btn)
+        layout.addWidget(self.retake_btn)
         layout.addWidget(self.logbox)
         self.setLayout(layout)
-        time.sleep(0.5)
-        self.update_preview()
 
     def validatePage(self):
-        workflow.finish_capture(self.wizard().selected_devices)
+        self.wizard().workflow.finish_capture()
         return True
 
     def keyPressEvent(self, event):
         if event.key() in (QtCore.Qt.Key_B, QtCore.Qt.Key_Space):
             self.doCapture()
 
-    def doCapture(self):
-        if self.start_time is None:
-            self.start_time = time.time()
-        if self.shot_count is None:
-            self.shot_count = 0
+    def updateControl(self):
+        images = self.wizard().workflow.images
+        self.control_odd.setPixmap(
+            QtGui.QPixmap.fromImage(QtGui.QImage(unicode(images[-2]))
+                                    .scaledToWidth(250)))
+        self.control_even.setPixmap(
+            QtGui.QPixmap.fromImage(QtGui.QImage(unicode(images[-1]))
+                                    .scaledToWidth(250)))
+
+    def retakeCapture(self):
+        self.retake_btn.setEnabled(False)
+        self.doCapture(retake=True)
+        self.retake_btn.setEnabled(True)
+
+    def doCapture(self, retake=False):
         self.capture_btn.setEnabled(False)
-        self.refresh_btn.setEnabled(False)
         with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(workflow.capture,
-                                     self.wizard().selected_devices)
+            future = executor.submit(self.wizard().workflow.capture, retake)
             while future.running():
                 QtGui.qApp.processEvents()
                 time.sleep(0.001)
         self.capture_btn.setEnabled(True)
-        self.refresh_btn.setEnabled(True)
         self.capture_btn.setFocus()
-        self.shot_count += 2
-        self.status.setText("Shot {0} pages in {1:.0f} minutes "
-                            "({2:.0f} pages/hour)".format(
-                                self.shot_count,
-                                (time.time() - self.start_time) / 60,
-                                ((3600 / (time.time() - self.start_time))
-                                 * self.shot_count)))
-
-    def update_preview(self):
-        def get_preview(dev):
-            img = dev._device.get_preview_image()
-            img = img.resize((320, 240), Image.ANTIALIAS).convert('RGBA')
-            data = img.tostring('raw')
-            image = QtGui.QImage(data, img.size[0], img.size[1],
-                                 QtGui.QImage.Format_ARGB32).rgbSwapped()
-            return dev.orientation, image
-
-        # TODO: Don't go via PIL, find a way to use RGB data directly
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            futures = executor.map(get_preview,
-                                   self.wizard().selected_devices)
-            previews = tuple(futures)
-        for orientation, image in previews:
-            pixmap = QtGui.QPixmap.fromImage(image)
-            if orientation == 'left':
-                self.left_preview.setPixmap(pixmap)
-            else:
-                self.right_preview.setPixmap(pixmap)
-
-
-class DownloadPage(QtGui.QWizardPage):
-    def initializePage(self):
-        self.setTitle("Downloading")
-
-        #TODO: Display a real progress bar here, update it according to the
-        #      combined number of files in raw or its subfolders
-        self.progressbar = QtGui.QProgressBar(self)
-        self.progressbar.setRange(0, 0)
-        self.progressbar.setAlignment(QtCore.Qt.AlignCenter)
-        self.logbox = QtGui.QTextEdit()
-        self.log_handler = LogBoxHandler(self.logbox)
-        self.log_handler.setLevel(logging.INFO)
-        self.log_handler.setFormatter(LogBoxFormatter())
-        logging.getLogger().addHandler(self.log_handler)
-        self.log_handler.sig.connect(self.logbox.append)
-
-        layout = QtGui.QVBoxLayout()
-        layout.addWidget(self.progressbar)
-        layout.addWidget(self.logbox)
-        self.setLayout(layout)
-        self.logbox.clear()
-        QtCore.QTimer.singleShot(0, self.doDownload)
-
-    def doDownload(self):
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(workflow.download,
-                                     self.wizard().selected_devices,
-                                     self.wizard().project_path)
-            while future.running():
-                QtGui.qApp.processEvents()
-                self.progressbar.setValue(0)
-                time.sleep(0.001)
-            if future.exception():
-                raise future.exception()
-        self.progressbar.hide()
-        if ('combine' in self.wizard().active_plugins and not
-                os.listdir(os.path.join(self.wizard().project_path, 'raw'))):
-            msg_box = QtGui.QMessageBox()
-            msg_box.setText("It seems that combining the images has failed."
-                            "Please fix the issue manually and retry.")
-            # TODO: Add a 'combine' button to retry combining.
-            msg_box.setIcon(QtGui.QMessageBox.Critical)
-            self.combine_btn = msg_box.addButton("Combine",
-                                                 QtGui.QMessageBox.ApplyRole)
-            self.combine_btn.clicked.connect(get_pluginmanager()['combine']
-                                             .download(self.wizard()
-                                             .project_path))
-            msg_box.exec_()
-
-    def validatePage(self):
-        logging.getLogger().removeHandler(self.log_handler)
-        return True
+        self.shot_count += len(self.wizard().workflow.devices)
+        if hasattr(self, '_start_time'):
+            capture_speed = ((3600 / (time.time() - self._start_time))
+                             * self.shot_count)
+        else:
+            self._start_time = start_time
+            capture_speed = 0.0
+        self.status.setText(
+            "Shot {0} pages in {1:.0f} minutes ({2:.0f} pages/hour)"
+            .format(self.shot_count, (time.time() - self._start_time) / 60,
+                    capture_speed))
+        self.updateControl()
 
 
 class PostprocessPage(QtGui.QWizardPage):
+    done = False
+
     def initializePage(self):
         self.setTitle("Postprocessing")
 
         self.progressbar = QtGui.QProgressBar(self)
-        self.progressbar.setRange(0, 0)
+        self.progressbar.setRange(0, 100)
         self.progressbar.setAlignment(QtCore.Qt.AlignCenter)
         self.logbox = QtGui.QTextEdit()
         self.log_handler = LogBoxHandler(self.logbox)
@@ -342,16 +359,22 @@ class PostprocessPage(QtGui.QWizardPage):
         QtCore.QTimer.singleShot(0, self.doPostprocess)
 
     def doPostprocess(self):
+        self.wizard().workflow.on_step_progressed.connect(
+            lambda x, **kwargs: self.progressbar.setValue(
+                int(kwargs['progress']*100)), weak=False)
         with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(workflow.process,
-                                     self.wizard().project_path)
+            future = executor.submit(self.wizard().workflow.process)
             while not future.done():
                 QtGui.qApp.processEvents()
-                self.progressbar.setValue(0)
                 time.sleep(0.01)
             if future.exception():
                 raise future.exception()
         self.progressbar.hide()
+        self.done = True
+        self.completeChanged.emit()
+
+    def isComplete(self):
+        return self.done
 
     def validatePage(self):
         logging.getLogger().removeHandler(self.log_handler)
@@ -359,11 +382,14 @@ class PostprocessPage(QtGui.QWizardPage):
 
 
 class OutputPage(QtGui.QWizardPage):
+    done = False
+
     def initializePage(self):
         self.setTitle("Generating output files")
+        self.setFinalPage(True)
 
         self.progressbar = QtGui.QProgressBar(self)
-        self.progressbar.setRange(0, 0)
+        self.progressbar.setRange(0, 100)
         self.progressbar.setAlignment(QtCore.Qt.AlignCenter)
         self.logbox = QtGui.QTextEdit()
         self.log_handler = LogBoxHandler(self.logbox)
@@ -380,22 +406,21 @@ class OutputPage(QtGui.QWizardPage):
         QtCore.QTimer.singleShot(0, self.doGenerateOutput)
 
     def doGenerateOutput(self):
+        self.wizard().workflow.on_step_progressed.connect(
+            lambda x, **kwargs: self.progressbar.setValue(
+                int(kwargs['progress']*100)), weak=False)
         with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(workflow.output,
-                                     self.wizard().project_path)
+            future = executor.submit(self.wizard().workflow.output)
             while not future.done():
                 QtGui.qApp.processEvents()
-                self.progressbar.setValue(0)
-                time.sleep(0.001)
+                time.sleep(0.01)
         self.progressbar.hide()
+        self.done = True
+        self.completeChanged.emit()
+
+    def isComplete(self):
+        return self.done
 
     def validatePage(self):
         logging.getLogger().removeHandler(self.log_handler)
         return True
-
-
-class FinishPage(QtGui.QWizardPage):
-    def initializePage(self):
-        self.setFinalPage(True)
-        self.setTitle("Done!")
-        # TODO: Offer option to view project folder on exit

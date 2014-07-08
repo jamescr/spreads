@@ -1,18 +1,37 @@
 # -*- coding: utf-8 -*-
 
+# Copyright (C) 2014 Johannes Baiter <johannes.baiter@gmail.com>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
 from __future__ import division, unicode_literals
 
 import logging
 import math
 import multiprocessing
-import os
 import re
 import shutil
 import subprocess
 import tempfile
+import time
 from xml.etree.cElementTree import ElementTree as ET
 
-from spreads.plugin import HookPlugin
+import psutil
+from spreads.vendor.pathlib import Path
+
+from spreads.config import OptionTemplate
+from spreads.plugin import HookPlugin, ProcessHookMixin
 from spreads.util import find_in_path, MissingDependencyException
 
 if not find_in_path('scantailor-cli'):
@@ -23,46 +42,52 @@ if not find_in_path('scantailor-cli'):
 logger = logging.getLogger('spreadsplug.scantailor')
 
 
-class ScanTailorPlugin(HookPlugin):
-    _enhanced = bool(re.match(r".*<images\|directory\|->.*",
+class ScanTailorPlugin(HookPlugin, ProcessHookMixin):
+    __name__ = 'scantailor'
+
+    @classmethod
+    def configuration_template(cls):
+        conf = {
+            'autopilot': OptionTemplate(value=False,
+                                        docstring="Skip manual correction"),
+            'rotate': OptionTemplate(value=False, docstring="Rotate pages"),
+            'split_pages': OptionTemplate(value=True,
+                                          docstring="Split pages"),
+            'deskew': OptionTemplate(value=True, docstring="Deskew pages"),
+            'content': OptionTemplate(value=True,
+                                      docstring="Detect page content"),
+            'auto_margins': OptionTemplate(value=True,
+                                           docstring="Automatically detect"
+                                                     " margins"),
+            'detection': OptionTemplate(value=('content', 'page'),
+                                        docstring="Content detection mode",
+                                        selectable=True),
+            'margins': OptionTemplate([2.5, 2.5, 2.5, 2.5])
+        }
+        return conf
+
+    def __init__(self, config):
+        super(ScanTailorPlugin, self).__init__(config)
+        self._enhanced = bool(re.match(r".*<images\|directory\|->.*",
                               subprocess.check_output('scantailor-cli')
                               .splitlines()[7]))
 
-    @classmethod
-    def add_arguments(cls, command, parser):
-        if command == "postprocess":
-            parser.add_argument(
-                "--auto", "-a", dest="autopilot", action="store_true",
-                default=False,
-                help="Don't prompt user to edit ScanTailor configuration")
-            if cls._enhanced:
-                parser.add_argument(
-                    "--page-detection", "-pd", dest="page_detection",
-                    action="store_true", default=False,
-                    help="Use page for layout instead of content")
-
     def _generate_configuration(self, projectfile, img_dir, out_dir):
-        if not os.path.exists(out_dir):
-            os.mkdir(out_dir)
+        if not out_dir.exists():
+            out_dir.mkdir()
         logger.info("Generating ScanTailor configuration")
-        filterconf = [self.config['scantailor'][x].get(bool)
+        filterconf = [self.config[x].get(bool)
                       for x in ('rotate', 'split_pages', 'deskew', 'content',
                                 'auto_margins')]
         start_filter = filterconf.index(True)+1
-        end_filter = len(filterconf) - list(reversed(filterconf)).index(True)+1
-        marginconf = self.config['scantailor']['margins'].as_str_seq()
+        end_filter = len(filterconf) - list(reversed(filterconf)).index(True)
+        marginconf = self.config['margins'].as_str_seq()
         generation_cmd = ['scantailor-cli',
                           '--start-filter={0}'.format(start_filter),
                           '--end-filter={0}'.format(end_filter),
                           '--layout=1.5',
-                          '--dpi={0}'.format(self.config['device']['dpi']
-                                            .get(int)),
                           '-o={0}'.format(projectfile)]
-        page_detection = (
-            self.config['scantailor']['detection'] == 'page'
-            or ('page_detection' in self.config.keys()
-                and self.config['page_detection'].get(bool))
-        )
+        page_detection = self.config['detection'].get() == 'page'
         if self._enhanced and page_detection:
             generation_cmd.extend([
                 '--enable-page-detection',
@@ -77,22 +102,47 @@ class ScanTailorPlugin(HookPlugin):
                 '--margins-left={0}'.format(marginconf[3]),
             ])
         if self._enhanced:
-            generation_cmd.append(img_dir)
+            generation_cmd.append(unicode(img_dir))
         else:
-            generation_cmd.extend([os.path.join(img_dir, x)
-                                   for x in os.listdir(img_dir)])
-        generation_cmd.append(out_dir)
+            generation_cmd.extend([unicode(x)
+                                   for x in sorted(img_dir.iterdir())])
+        generation_cmd.append(unicode(out_dir))
         logger.debug(" ".join(generation_cmd))
-        subprocess.call(generation_cmd)
+        proc = psutil.Process(subprocess.Popen(generation_cmd).pid)
+
+        num_images = sum(1 for x in img_dir.iterdir())
+        num_steps = end_filter - start_filter
+        last_filenum = 0
+        recent_filenum = 0
+        finished_steps = 0
+        while proc.is_running():
+            try:
+                recent_filenum = next(int(Path(x.path).name.split('.')[0])
+                                      for x in proc.open_files()
+                                      if unicode(img_dir) in x.path)
+            except StopIteration:
+                pass
+            except psutil.AccessDenied:
+                # This means the process is no longer running
+                break
+            if recent_filenum == last_filenum:
+                time.sleep(.1)
+                continue
+            if recent_filenum < last_filenum:
+                finished_steps += 1
+            last_filenum = recent_filenum
+            progress = 0.5*((finished_steps*num_images+last_filenum) /
+                            float(num_steps*num_images))
+            self.on_progressed.send(self, progress=progress)
 
     def _split_configuration(self, projectfile, temp_dir):
         num_pieces = multiprocessing.cpu_count()
-        tree = ET(file=projectfile)
+        tree = ET(file=unicode(projectfile))
         num_files = len(tree.findall('./files/file'))
         splitfiles = []
         files_per_job = int(math.ceil(float(num_files)/num_pieces))
         for idx in xrange(num_pieces):
-            tree = ET(file=projectfile)
+            tree = ET(file=unicode(projectfile))
             root = tree.getroot()
             start = idx*files_per_job
             end = start + files_per_job
@@ -106,45 +156,51 @@ class ScanTailorPlugin(HookPlugin):
                              if not x in to_keep]
                 for node in to_remove:
                     elem_root.remove(node)
-            out_file = os.path.join(temp_dir,
-                                    "{0}-{1}.ScanTailor".format(
-                                    os.path.splitext(os.path.basename(
-                                    projectfile))[0], idx))
-            tree.write(out_file)
+            out_file = temp_dir / "{0}-{1}.ScanTailor".format(projectfile.stem,
+                                                              idx)
+            tree.write(unicode(out_file))
             splitfiles.append(out_file)
         return splitfiles
 
-    def _generate_output(self, projectfile, out_dir):
+    def _generate_output(self, projectfile, out_dir, num_pages):
         logger.debug("Generating output...")
-        temp_dir = tempfile.mkdtemp(prefix="spreads.")
+        temp_dir = Path(tempfile.mkdtemp(prefix="spreads."))
         split_config = self._split_configuration(projectfile, temp_dir)
         logger.debug("Launching those subprocesses!")
         processes = [subprocess.Popen(['scantailor-cli', '--start-filter=6',
-                                       x, out_dir])
-                     for x in split_config]
+                                       unicode(cfgfile), unicode(out_dir)])
+                     for cfgfile in split_config]
+
+        last_count = 0
         while processes:
+            recent_count = sum(1 for x in out_dir.glob('*.tif'))
+            if recent_count > last_count:
+                self.on_progressed.send(
+                    self, progress=0.5+(float(recent_count)/num_pages)/2)
             for p in processes[:]:
                 if p.poll() is not None:
                     processes.remove(p)
-        shutil.rmtree(temp_dir)
+        shutil.rmtree(unicode(temp_dir))
 
     def process(self, path):
-        autopilot = (self.config['scantailor']['autopilot']
-                     .get(bool) or self.config['autopilot'].get(bool))
+        autopilot = self.config['autopilot'].get(bool)
         if not autopilot and not find_in_path('scantailor'):
             raise MissingDependencyException(
                 "Could not find executable `scantailor` in"
                 " $PATH. Please install the appropriate"
                 " package(s)!")
-        projectfile = os.path.join(path, "{0}.ScanTailor".format(
-            os.path.basename(path)))
-        img_dir = os.path.join(path, 'raw')
-        out_dir = os.path.join(path, 'done')
+        projectfile = path / "{0}.ScanTailor".format(path.name)
+        img_dir = path / 'raw'
+        out_dir = path / 'done'
 
-        if not os.path.exists(projectfile):
+        if not projectfile.exists():
             self._generate_configuration(projectfile, img_dir, out_dir)
+
         if not autopilot:
             logger.info("Opening ScanTailor GUI for manual adjustment")
-            subprocess.call(['scantailor', projectfile])
+            subprocess.call(['scantailor', unicode(projectfile)])
         logger.info("Generating output images from ScanTailor configuration.")
-        self._generate_output(projectfile, out_dir)
+
+        num_pages = sum(1 for x in img_dir.iterdir()
+                        if x.suffix.lower() in ('.jpeg', '.jpg'))
+        self._generate_output(projectfile, out_dir, num_pages)

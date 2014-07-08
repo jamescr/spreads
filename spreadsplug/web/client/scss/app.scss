@@ -1,0 +1,292 @@
+@import "settings";
+@import "foundation";
+
+@mixin animation ($animation, $duration, $iteration-count, $timing-function, $delay) {
+  -webkit-animation: $animation $duration $iteration-count $timing-function $delay;
+  -moz-animation: $animation $duration $iteration-count $timing-function $delay;
+  -o-animation: $animation $duration $iteration-count $timing-function $delay;
+  animation: $animation $duration $iteration-count $timing-function $delay;
+}
+
+@mixin keyframes($name) {
+    @-webkit-keyframes #{$name} { @content; };
+    @-moz-keyframes #{$name} { @content; };
+    @-o-keyframes #{$name} { @content; };
+    @keyframes #{$name} { @content; };
+}
+
+@mixin transform($transformation) {
+  -webkit-transform: $transformation;
+  -moz-transform: $transformation;
+  -ms-transform: $transformation;
+  -o-transform: $transformation;
+  transform: $transformation;
+}
+
+.action-button {
+  @include button(rem-calc(12));
+  font-size: rem-calc(32);
+  line-height: rem-calc(32);
+
+  &.small {
+    @include button(rem-calc(10));
+    font-size: rem-calc(24);
+    line-height: rem-calc(24);
+  }
+
+  &.tiny {
+    @include button(rem-calc(8));
+    font-size: rem-calc(14);
+    line-height: rem-calc(14);
+  }
+
+  &.disabled {
+    @include button-style($disabled:true);
+  }
+
+  &.secondary { @include button-style($bg:$secondary-color); }
+
+  &.complete { @include button-style($bg:$success-color); }
+}
+
+.capture-preview {
+  text-align: center;
+
+  img {
+    @media #{$small-only} and (orientation: portrait) {
+      width: 75%
+    }
+    @media #{$medium-up} {
+      width: 100%;
+    }
+  }
+}
+
+.capture-info {
+  .columns {
+    font-weight: bold;
+    text-align: center;
+    margin-bottom: 1em;
+  }
+}
+
+.capture-controls {
+  text-align: center;
+  ul {
+    margin-bottom: 0;
+  }
+  li {
+    .action-button {
+      width: 10%;
+    }
+    display: inline;
+    list-style-type: none;
+  }
+  #retake-capture .action-button {
+    width: 20%;
+  }
+  #trigger-capture .action-button {
+    width: 45%;
+  }
+}
+
+.shortcuts ul {
+  list-style: none;
+  margin-left: 0;
+}
+
+.logtable {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.logger-col {
+  width: 25%;
+}
+
+.msg-col {
+  width: 62.5%;
+}
+
+.time-col {
+  width: 12.5%;
+}
+
+.logentry {
+  &.exception {
+    background-color: $alert-color;
+  }
+  &.error, &.warning {
+    background-color: $warning-color;
+  }
+  &.info {
+    background-color: $info-color;
+  }
+  td {
+    word-break: break-all;
+  }
+}
+
+.reveal-modal {
+    width: 50%;
+    margin-left: -25%;
+
+  &.fixed {
+    position: fixed;
+    margin-left: 0;
+    top: 10%;
+    left: 25%;
+  }
+}
+
+.traceback {
+  margin-bottom: 1rem;
+  overflow-x: scroll;
+}
+
+/* ===== Overlays ===== */
+.overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(255,255,255,0.8);
+  z-index: 1000;
+  text-align: center;
+
+  &.lightbox {
+    outline: none;
+
+    img {
+      max-width: 100%;
+      max-height: 100%;
+    }
+  }
+
+  &.activity {
+    display: table;
+
+    .text {
+      display: table-cell;
+      vertical-align: middle;
+      padding-top: 8em;
+    }
+
+    .animation {
+      position: absolute;
+      left: calc(50% - 20px);
+      top: calc(50% - 20px);
+      margin: 0;
+      width: 40px;
+      height: 40px;
+      //margin: 0 auto;
+
+      .bounce {
+        width: 100%;
+        height: 100%;
+        border-radius: 50%;
+        background-color: #000;
+        opacity: 0.6;
+        position: absolute;
+        top: 0;
+        left: 0;
+
+        &:first-child {
+          @include animation(bounce, 2.0s, infinite, ease-in-out, 0s);
+        }
+        &:last-child {
+          @include animation(bounce, 2.0s, infinite, ease-in-out, -1.0s);
+        }
+      }
+    }
+  }
+
+  &.spreads-progress {
+    .progress {
+      width: 50%;
+      left: 25%;
+      top: 45%;
+      position: absolute;
+      .status {
+        display: block;
+        margin-top: 1em;
+      }
+    }
+  }
+}
+
+.alert-box {
+  margin-bottom: 0;
+}
+
+/* ======= Animations ======== */
+@include keyframes(bounce) {
+  0%, 100% {
+    @include transform(scale(0.0));
+  }
+  50% {
+    @include transform(scale(1.0));
+  }
+}
+
+@font-face {
+  font-family: 'Open Sans';
+  font-style: normal;
+  font-weight: 300;
+  src: url('/static/fonts/OpenSans-Light-webfont.eot');
+  src: url('/static/fonts/OpenSans-Light-webfont.eot?#iefix') format('embedded-opentype'),
+       url('/static/fonts/OpenSans-Light-webfont.woff') format('woff'),
+       url('/static/fonts/OpenSans-Light-webfont.ttf') format('truetype'),
+       url('/static/fonts/OpenSans-Light-webfont.svg#open_sanslight') format('svg');
+}
+@font-face {
+  font-family: 'Open Sans';
+  font-style: normal;
+  font-weight: 400;
+  src: url('/static/fonts/OpenSans-Regular-webfont.eot');
+  src: url('/static/fonts/OpenSans-Regular-webfont.eot?#iefix') format('embedded-opentype'),
+       url('/static/fonts/OpenSans-Regular-webfont.woff') format('woff'),
+       url('/static/fonts/OpenSans-Regular-webfont.ttf') format('truetype'),
+       url('/static/fonts/OpenSans-Regular-webfont.svg#open_sansregular') format('svg');
+}
+@font-face {
+  font-family: 'Open Sans';
+  font-style: normal;
+  font-weight: 700;
+  src: url('/static/fonts/OpenSans-Bold-webfont.eot');
+  src: url('/static/fonts/OpenSans-Bold-webfont.eot?#iefix') format('embedded-opentype'),
+       url('/static/fonts/OpenSans-Bold-webfont.woff') format('woff'),
+       url('/static/fonts/OpenSans-Bold-webfont.ttf') format('truetype'),
+       url('/static/fonts/OpenSans-Bold-webfont.svg#open_sansbold') format('svg');
+}
+@font-face {
+  font-family: 'Open Sans';
+  font-style: italic;
+  font-weight: 300;
+  src: url('/static/fonts/OpenSans-LightItalic-webfont.eot');
+  src: url('/static/fonts/OpenSans-LightItalic-webfont.eot?#iefix') format('embedded-opentype'),
+       url('/static/fonts/OpenSans-LightItalic-webfont.woff') format('woff'),
+       url('/static/fonts/OpenSans-LightItalic-webfont.ttf') format('truetype'),
+       url('/static/fonts/OpenSans-LightItalic-webfont.svg#open_sanslight_italic') format('svg');
+}
+@font-face {
+  font-family: 'Open Sans';
+  font-style: italic;
+  font-weight: 400;
+  src: url('/static/fonts/OpenSans-Italic-webfont.eot');
+  src: url('/static/fonts/OpenSans-Italic-webfont.eot?#iefix') format('embedded-opentype'),
+       url('/static/fonts/OpenSans-Italic-webfont.woff') format('woff'),
+       url('/static/fonts/OpenSans-Italic-webfont.ttf') format('truetype'),
+       url('/static/fonts/OpenSans-Italic-webfont.svg#open_sansitalic') format('svg');
+}
+@font-face {
+  font-family: 'Open Sans';
+  font-style: italic;
+  font-weight: 700;
+  src: url('/static/fonts/OpenSans-BoldItalic-webfont.eot');
+  src: url('/static/fonts/OpenSans-BoldItalic-webfont.eot?#iefix') format('embedded-opentype'),
+       url('/static/fonts/OpenSans-BoldItalic-webfont.woff') format('woff'),
+       url('/static/fonts/OpenSans-BoldItalic-webfont.ttf') format('truetype'),
+       url('/static/fonts/OpenSans-BoldItalic-webfont.svg#open_sansbold_italic') format('svg');
+}

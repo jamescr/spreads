@@ -1,11 +1,17 @@
+Bugs
+====
+- Disable gvfs in chdkcamera plugin and re-enable it after the capture
+- Raise minimum version for remote capture
+
 General
 =======
-- Add support for different scanning profiles that can be selected
-  (e.g.: 'illustrations', 'text'), involves enhancing confit to load
-  configuration from arbitrary files.
-- More tests, espescially for included plugins
-- Find a way to re-use CLI arguments in the wizard
-- Add more cli-switches to scantailor plugin (compare to config)
+- Clean up GUI code, it's an unholy mess...
+- Refactor tests, they need work on several levels:
+    * more specific: what should a method *do*/*effects*
+    * less mock objects
+    * better coverage
+- Reinstate 'combine' plugin as a custom subcommand that expects 'odd' and
+  'even' directories in project path
 
 Plugin ideas
 ============

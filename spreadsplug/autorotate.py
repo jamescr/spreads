@@ -1,80 +1,61 @@
 # -*- coding: utf-8 -*-
 
-from __future__ import division
+# Copyright (C) 2014 Johannes Baiter <johannes.baiter@gmail.com>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import logging
-import os
 
-import wand.image
 from concurrent import futures
-from pexif import JpegFile
+from jpegtran import JPEGImage
 
-from spreads.plugin import HookPlugin
+from spreads.plugin import HookPlugin, ProcessHookMixin
 
 logger = logging.getLogger('spreadsplug.autorotate')
 
 
-def rotate_image(path, rotation):
-    with wand.image.Image(filename=path) as img:
-        logger.debug("Rotating image \'{0}\' by {1} degrees"
-                     .format(path, rotation))
-        if img.height > img.width:
-            logger.info("Image already rotated, skipping...")
-        else:
-            img.rotate(rotation)
-            img.save(filename=path)
-    # Update EXIF orientation
-    img = JpegFile.fromFile(path)
-    if not img.exif.primary.Orientation == [1]:
-        logger.debug("Updating EXIF information for image '{0}'".format(path))
-        img.exif.primary.Orientation = [1]
-        img.writeFile(path)
+def autorotate_image(path):
+    img = JPEGImage(path)
+    if img.exif_orientation is None:
+        logger.warn("Image {0} did not have any EXIF rotation, did not rotate."
+                    .format(path))
+        return
+    elif img.exif_orientation == 1:
+        logger.info("Image {0} is already rotated.".format(path))
+        return
+    rotated = img.exif_autotransform()
+    rotated.save(path)
 
 
-class AutoRotatePlugin(HookPlugin):
-    @classmethod
-    def add_arguments(cls, command, parser):
-        if command == 'postprocess':
-            parser.add_argument("--rotate-inverse", "-ri",
-                                dest="rotate_inverse", action="store_true",
-                                default=False,
-                                help="Rotate left pages CCW, right pages CW"
-                                " (use when first page comes from right"
-                                " camera)")
+class AutoRotatePlugin(HookPlugin, ProcessHookMixin):
+    __name__ = 'autorotate'
+
+    def _get_progress_callback(self, idx, num_total):
+        return lambda x: self.on_progressed.send(
+            self,
+            progress=float(idx)/num_total)
 
     def process(self, path):
-        img_dir = os.path.join(path, 'raw')
-        # Silence Wand logger
-        (logging.getLogger("wand")
-                .setLevel(logging.ERROR))
+        img_dir = path / 'raw'
         logger.info("Rotating images in {0}".format(img_dir))
         with futures.ProcessPoolExecutor() as executor:
-            for imgpath in os.listdir(img_dir):
-                try:
-                    img = JpegFile.fromFile(os.path.join(img_dir, imgpath))
-                    if img.exif.primary.Orientation == [8]:
-                        rotation = (self.config['autorotate']
-                                    ['left'].get(int))
-                    elif img.exif.primary.Orientation == [6]:
-                        rotation = (self.config['autorotate']
-                                    ['right'].get(int))
-                    elif img.exif.primary.Orientation == [1]:
-                        # Already rotated, so we skip it
-                        continue
-                    else:
-                        raise Exception("Invalid value for orientation: {0}"
-                                        .format(img.exif.primary.Orientation))
-                except Exception as exc:
-                    logger.warn("Cannot determine rotation for image {0}!"
-                                .format(imgpath))
-                    logger.exception(exc)
+            files = sorted(img_dir.iterdir())
+            num_total = len(files)
+            for (idx, imgpath) in enumerate(files):
+                if imgpath.suffix.lower() not in ('.jpg', '.jpeg'):
                     continue
-                if self.config['rotate_inverse'].get(bool):
-                    rotation *= -1
-                logger.debug("Orientation for \"{0}\" is {1}"
-                             .format(imgpath, rotation))
-                executor.submit(
-                    rotate_image,
-                    os.path.join(img_dir, imgpath),
-                    rotation=rotation
+                future = executor.submit(autorotate_image, unicode(imgpath))
+                future.add_done_callback(
+                    self._get_progress_callback(idx, num_total)
                 )
