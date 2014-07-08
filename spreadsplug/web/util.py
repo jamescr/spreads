@@ -17,22 +17,28 @@
 
 from __future__ import division
 
-import calendar
 import logging
+import mimetypes
 import time
 import traceback
+import uuid
 from datetime import datetime
+from io import BufferedIOBase, UnsupportedOperation
 
 from flask import abort
 from flask.json import JSONEncoder
-from jpegtran import JPEGImage
-from werkzeug.routing import BaseConverter, ValidationError
+from spreads.vendor.pathlib import Path
+from wand.image import Image
+from werkzeug.routing import BaseConverter
 
-from spreads.workflow import Workflow
+from spreads.workflow import Workflow, signals as workflow_signals
 from spreads.util import EventHandler
 
-from persistence import get_workflow
-
+try:
+    from jpegtran import JPEGImage
+    HAS_JPEGTRAN = True
+except ImportError:
+    HAS_JPEGTRAN = False
 logger = logging.getLogger('spreadsplug.web.util')
 
 # NOTE: This is a workaround for a known datetime/time race condition, see
@@ -61,31 +67,37 @@ class Event(object):
 
 class CustomJSONEncoder(JSONEncoder):
     def default(self, obj):
-        if isinstance(obj, Workflow):
+        if hasattr(obj, 'to_dict'):
+            return obj.to_dict()
+        elif isinstance(obj, Workflow):
             return self._workflow_to_dict(obj)
         elif isinstance(obj, logging.LogRecord):
             return self._logrecord_to_dict(obj)
         elif isinstance(obj, Event):
             return self._event_to_dict(obj)
+        elif isinstance(obj, Path):
+            return mimetypes.guess_type(unicode(obj))[0]
         elif isinstance(obj, datetime):
             # Return datetime as an epoch timestamp with microsecond-resolution
-            ts = (calendar.timegm(obj.timetuple())*1000
-                  + obj.microsecond)/1000.0
-            return ts
+            return (time.mktime(obj.timetuple())*1000 + obj.microsecond)/1000.0
         else:
             return JSONEncoder.default(self, obj)
 
     def _workflow_to_dict(self, workflow):
         return {
             'id': workflow.id,
+            'slug': workflow.slug,
             'name': workflow.path.name,
-            'step': workflow.step,
-            'step_done': workflow.step_done,
-            'images': [get_image_url(workflow, x)
-                       for x in workflow.images] if workflow.images else [],
-            'out_files': ([unicode(path) for path in workflow.out_files]
-                          if workflow.out_files else []),
-            'config': workflow.config.flatten()
+            'metadata': dict(workflow.metadata),
+            'status': workflow.status,
+            'last_modified': workflow.last_modified,
+            'pages': workflow.pages,
+            'out_files': [{'name': path.name,
+                           'mimetype': path}
+                          for path in workflow.out_files],
+            'config': {k: v for k, v in workflow.config.flatten().iteritems()
+                       if k in workflow.config['plugins'].get()
+                       or k in ('device', 'plugins')}
         }
 
     def _logrecord_to_dict(self, record):
@@ -101,12 +113,9 @@ class CustomJSONEncoder(JSONEncoder):
     def _event_to_dict(self, event):
         name = event.signal.name
         data = event.data
-        if event.signal in Workflow.signals.values():
+        if event.signal in workflow_signals.values():
             if 'id' not in data:
                 data['id'] = event.sender.id
-            if 'images' in data:
-                data['images'] = [get_image_url(event.sender, imgpath)
-                                  for imgpath in data['images']]
         elif event.signal is EventHandler.on_log_emit:
             data = data['record']
         return {'name': name, 'data': data}
@@ -114,33 +123,96 @@ class CustomJSONEncoder(JSONEncoder):
 
 class WorkflowConverter(BaseConverter):
     def to_python(self, value):
-        workflow_id = None
+        from spreadsplug.web import app
         try:
-            workflow_id = int(value)
+            uuid.UUID(value)
+            workflow = Workflow.find_by_id(app.config['base_path'], value)
         except ValueError:
-            raise ValidationError()
-        workflow = get_workflow(workflow_id)
+            workflow = Workflow.find_by_slug(app.config['base_path'], value)
         if workflow is None:
             abort(404)
         return workflow
 
     def to_url(self, value):
-        return unicode(value.id)
+        return value.slug
 
 
-def get_image_url(workflow, img_path):
-    img_num = int(img_path.stem)
-    return "/api/workflow/{0}/image/{1}".format(workflow.id, img_num)
+class GeneratorIO(BufferedIOBase):
+    """ Wrapper around a generator to act as a file-like object.
+    """
+    def __init__(self, generator, length=None):
+        self._generator = generator
+        self._next_chunk = bytearray()
+        self._length = length
+
+    def read(self, num_bytes=None):
+        if self._next_chunk is None:
+            return b''
+        try:
+            if num_bytes is None:
+                rv = self._next_chunk[:]
+                self._next_chunk[:] = next(self._generator)
+                return bytes(rv)
+            while len(self._next_chunk) < num_bytes:
+                self._next_chunk += next(self._generator)
+            rv = self._next_chunk[:num_bytes]
+            self._next_chunk[:] = self._next_chunk[num_bytes:]
+            return bytes(rv)
+        except StopIteration:
+            rv = self._next_chunk[:]
+            self._next_chunk = None
+            return bytes(rv)
+
+    def __len__(self):
+        if self._length is not None:
+            return self._length
+        else:
+            raise UnsupportedOperation
 
 
-def scale_image(img_name, width=None, height=None):
+def convert_image(img_path, img_format):
+    with Image(filename=unicode(img_path)) as img:
+        return img.make_blob(format=img_format)
+
+
+def scale_image(img_path, width=None, height=None):
+    def get_target_size(srcwidth, srcheight):
+        aspect = srcwidth/srcheight
+        target_width = width if width else int(aspect*height)
+        target_height = height if height else int(width/aspect)
+        return target_width, target_height
+
     if width is None and height is None:
         raise ValueError("Please specify either width or height")
-    img = JPEGImage(img_name)
-    aspect = img.width/img.height
-    width = width if width else int(aspect*height)
-    height = height if height else int(width/aspect)
-    return img.downscale(width, height).as_blob()
+    if HAS_JPEGTRAN and img_path.suffix.lower() in ('.jpg', '.jpeg'):
+        img = JPEGImage(unicode(img_path))
+        width, height = get_target_size(img.width, img.height)
+        return img.downscale(width, height).as_blob()
+    else:
+        with Image(filename=unicode(img_path)) as img:
+            width, height = get_target_size(img.width, img.height)
+            img.resize(width, height)
+            return img.make_blob(format='jpg')
+
+
+def crop_image(fname, left, top, width=None, height=None):
+    if HAS_JPEGTRAN:
+        img = JPEGImage(fname)
+    else:
+        img = Image(filename=fname)
+    width = (img.width - left) if width is None else width
+    height = (img.height - top) if height is None else height
+    if width > img.width:
+        width = img.width
+    if height > img.height:
+        width = img.height
+    logger.debug("Cropping \"{0}\" to x:{1} y:{2} w:{3} h:{4}"
+                 .format(fname, left, top, width, height))
+    cropped = img.crop(left, top, width=width, height=height)
+    if HAS_JPEGTRAN:
+        cropped.save(fname)
+    else:
+        img.save(filename=fname)
 
 
 def get_thumbnail(img_path):
@@ -151,13 +223,15 @@ def get_thumbnail(img_path):
     :return:          The thumbnail
     :rtype:           bytestring
     """
-    thumb = JPEGImage(unicode(img_path)).exif_thumbnail.as_blob()
-    if thumb:
-        logger.debug("Using EXIF thumbnail for {0}".format(img_path))
-        return thumb
-    else:
-        logger.debug("Generating thumbnail for {0}".format(img_path))
-        return scale_image(unicode(img_path), width=160)
+    if HAS_JPEGTRAN and img_path.suffix.lower() in ('.jpg', '.jpeg'):
+        img = JPEGImage(unicode(img_path))
+        thumb = img.exif_thumbnail
+        if thumb:
+            logger.debug("Using EXIF thumbnail for {0}".format(img_path))
+            return thumb.as_blob()
+
+    logger.debug("Generating thumbnail for {0}".format(img_path))
+    return scale_image(img_path, width=160)
 
 
 def find_stick():
@@ -181,3 +255,11 @@ def find_stick():
                        iudisks.FindDeviceByDeviceFile(
                            istick.Get("", "DeviceFile"))),
         "org.freedesktop.DBus.UDisks.Device")
+
+
+def find_stick_win():
+    import win32api
+    import win32file
+    for drive in win32api.GetLogicalDriveStrings().split("\x00")[:-1]:
+        if win32file.GetDriveType(drive) == win32file.DRIVE_REMOVABLE:
+            return drive

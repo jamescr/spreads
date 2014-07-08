@@ -299,12 +299,12 @@ class CapturePage(QtGui.QWizardPage):
             self.doCapture()
 
     def updateControl(self):
-        images = self.wizard().workflow.images
+        images = [p.raw_image for p in self.wizard().workflow.pages[-2:]]
         self.control_odd.setPixmap(
-            QtGui.QPixmap.fromImage(QtGui.QImage(unicode(images[-2]))
+            QtGui.QPixmap.fromImage(QtGui.QImage(unicode(images[0]))
                                     .scaledToWidth(250)))
         self.control_even.setPixmap(
-            QtGui.QPixmap.fromImage(QtGui.QImage(unicode(images[-1]))
+            QtGui.QPixmap.fromImage(QtGui.QImage(unicode(images[1]))
                                     .scaledToWidth(250)))
 
     def retakeCapture(self):
@@ -326,7 +326,7 @@ class CapturePage(QtGui.QWizardPage):
             capture_speed = ((3600 / (time.time() - self._start_time))
                              * self.shot_count)
         else:
-            self._start_time = start_time
+            self._start_time = time.time()
             capture_speed = 0.0
         self.status.setText(
             "Shot {0} pages in {1:.0f} minutes ({2:.0f} pages/hour)"
@@ -337,6 +337,7 @@ class CapturePage(QtGui.QWizardPage):
 
 class PostprocessPage(QtGui.QWizardPage):
     done = False
+    progress = QtCore.Signal(int)
 
     def initializePage(self):
         self.setTitle("Postprocessing")
@@ -359,9 +360,19 @@ class PostprocessPage(QtGui.QWizardPage):
         QtCore.QTimer.singleShot(0, self.doPostprocess)
 
     def doPostprocess(self):
-        self.wizard().workflow.on_step_progressed.connect(
-            lambda x, **kwargs: self.progressbar.setValue(
-                int(kwargs['progress']*100)), weak=False)
+        # Workaround for Qt threading issue:
+        # QWidget::repaint: Recursive repaint detected, Segfaults
+        # Use Qt event loop instead, it's thread safe
+        def progress_callback(wf, changes):
+            if 'status' in changes and 'step_progress' in changes['status']:
+                self.progress.emit(
+                    int(changes['status']['step_progress']*100))
+
+        QtCore.QObject.connect(self, QtCore.SIGNAL("progress(int)"),
+                               self.progressbar, QtCore.SLOT("setValue(int)"))
+
+        workflow.on_modified.connect(progress_callback, weak=False,
+                                     sender=self.wizard().workflow)
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(self.wizard().workflow.process)
             while not future.done():
@@ -383,6 +394,7 @@ class PostprocessPage(QtGui.QWizardPage):
 
 class OutputPage(QtGui.QWizardPage):
     done = False
+    progress = QtCore.Signal(int)
 
     def initializePage(self):
         self.setTitle("Generating output files")
@@ -406,9 +418,19 @@ class OutputPage(QtGui.QWizardPage):
         QtCore.QTimer.singleShot(0, self.doGenerateOutput)
 
     def doGenerateOutput(self):
-        self.wizard().workflow.on_step_progressed.connect(
-            lambda x, **kwargs: self.progressbar.setValue(
-                int(kwargs['progress']*100)), weak=False)
+        # Workaround for Qt threading issue:
+        # QWidget::repaint: Recursive repaint detected, Segfaults
+        # Use Qt event loop instead, it's thread safe
+        def progress_callback(wf, changes):
+            if 'status' in changes and 'step_progress' in changes['status']:
+                self.progress.emit(
+                    int(changes['status']['step_progress']*100))
+
+        QtCore.QObject.connect(self, QtCore.SIGNAL("progress(int)"),
+                               self.progressbar, QtCore.SLOT("setValue(int)"))
+
+        workflow.on_modified.connect(progress_callback, weak=False,
+                                     sender=self.wizard().workflow)
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(self.wizard().workflow.output)
             while not future.done():

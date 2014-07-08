@@ -30,10 +30,10 @@ import time
 import colorama
 from spreads.vendor.pathlib import Path
 
+import spreads.workflow
 import spreads.plugin as plugin
 from spreads.config import Configuration
 from spreads.util import DeviceException, ColourStreamHandler, EventHandler
-from spreads.workflow import Workflow
 
 if sys.platform == 'win32':
     import msvcrt
@@ -67,16 +67,19 @@ def draw_progress(progress):
     sys.stdout.flush()
 
 
-def _select_driver():
+def _select_driver(current):
     print(colorize("Please select a device driver from the following list:",
                    colorama.Fore.BLUE))
-    available_drivers = plugin.available_drivers()
-    for pos, ext in enumerate(plugin.available_drivers(), 1):
+    available_drivers = plugin.available_drivers() + [None]
+    print("  [0]: Keep current ({0})".format(current))
+    for pos, ext in enumerate(available_drivers, 1):
         print("  [{0}]: {1}".format(pos, ext))
     while True:
         selection = raw_input("Select a driver: ")
+        if not selection or int(selection) == 0:
+            return current
         if not selection.isdigit() or int(selection) > len(available_drivers):
-            print(colorize("Please select a number in the range of 1 to {0}"
+            print(colorize("Please select a number in the range of 0 to {0}"
                            .format(len(available_drivers)), colorama.Fore.RED))
             continue
         driver = unicode(available_drivers[int(selection)-1])
@@ -85,9 +88,11 @@ def _select_driver():
         return driver
 
 
-def _select_plugins(selected_plugins=None):
-    if selected_plugins is None:
+def _select_plugins(preselected=None):
+    if preselected is None:
         selected_plugins = []
+    else:
+        selected_plugins = preselected[:]
     print("Please select your desired plugins from the following list:")
     available_plugins = plugin.available_plugins()
     while True:
@@ -118,8 +123,12 @@ def _setup_processing_pipeline(config):
     print("\n".join(" - {0}".format(ext) for ext in exts))
     while True:
         answer = raw_input("Please enter the extensions in the order that they"
-                           " should be invoked, separated by commas:\n")
-        plugins = [x.strip() for x in answer.split(',')]
+                           " should be invoked, separated by commas or hit"
+                           " enter to keep the current order:\n")
+        if not answer:
+            plugins = exts
+        else:
+            plugins = [x.strip() for x in answer.split(',')]
         if any(x not in exts for x in plugins):
             print(colorize("At least one of the entered extensions was not"
                            "found, please try again!", colorama.Fore.RED))
@@ -150,23 +159,35 @@ def _set_device_target_page(config, target_page):
 
 def configure(config):
     old_plugins = config["plugins"].get()
-    config["driver"] = _select_driver()
+    driver_name = _select_driver(config["driver"].get()
+                                        if 'driver' in config.keys() else None)
+    if driver_name:
+        config["driver"] = driver_name
+        driver = plugin.get_driver(config["driver"].get())
+    else:
+        driver = None
+    # Save driver
+    config.dump(filename=config.cfg_path)
+
     config["plugins"] = _select_plugins(old_plugins)
     _setup_processing_pipeline(config)
 
     # Load default configuration for newly added plugins
     new_plugins = [x for x in config["plugins"].get() if x not in old_plugins]
     for name in new_plugins:
+        if not name in config.templates:
+            continue
         config.set_from_template(name, config.templates[name])
 
-    driver = plugin.get_driver(config["driver"].get())
+    # Save plugins
+    config.dump(filename=config.cfg_path)
 
     # We only need to set the device target_page if the driver supports
     # shooting with two devices
-    if plugin.DeviceFeatures.IS_CAMERA in driver.features:
+    if driver and plugin.DeviceFeatures.IS_CAMERA in driver.features:
         answer = raw_input(
             "Do you want to configure the target_page of your devices?\n"
-            "(Required for shooting with two devices) [y/n]: ")
+            "(Required for shooting with two devices) [y/N]: ")
         answer = True if answer.lower() == 'y' else False
         if answer:
             print("Setting target page on cameras")
@@ -174,7 +195,7 @@ def configure(config):
                 _set_device_target_page(config, target_page)
 
         answer = raw_input("Do you want to setup the focus for your cameras? "
-                           "[y/n]: ")
+                           "[y/N]: ")
         answer = True if answer.lower() == 'y' else False
         if answer:
             print("Please turn on one of your capture devices.\n"
@@ -186,14 +207,14 @@ def configure(config):
             getch()
             focus = devs[0]._acquire_focus()
             config['device']['focus_distance'] = focus
-    print("Writing configuration file to '{0}'".format(config.cfg_path))
+    print("Configuration file written to '{0}'".format(config.cfg_path))
     config.dump(filename=config.cfg_path)
 
 
 def capture(config):
     path = config['path'].get()
-    workflow = Workflow(config=config, path=path)
-    workflow.on_created.send(workflow=workflow)
+    workflow = spreads.workflow.Workflow(config=config, path=path)
+    spreads.workflow.on_created.send(workflow)
     capture_keys = workflow.config['core']['capture_keys'].as_str_seq()
 
     # Some closures
@@ -201,19 +222,19 @@ def capture(config):
         # Callback to print statistics
         if refresh_stats.start_time is not None:
             pages_per_hour = ((3600/(time.time() - refresh_stats.start_time))
-                              * workflow.pages_shot)
+                              * len(workflow.pages))
         else:
             pages_per_hour = 0.0
             refresh_stats.start_time = time.time()
         status = ("\rShot {0: >3} pages [{1: >4.0f}/h] "
-                  .format(unicode(workflow.pages_shot), pages_per_hour))
+                  .format(len(workflow.pages), pages_per_hour))
         sys.stdout.write(status)
         sys.stdout.flush()
     refresh_stats.start_time = None
 
     def trigger_loop():
         is_posix = sys.platform != 'win32'
-        old_count = workflow.pages_shot
+        old_count = len(workflow.pages)
         if is_posix:
             import select
             old_settings = termios.tcgetattr(sys.stdin)
@@ -229,8 +250,8 @@ def capture(config):
                 tty.setcbreak(sys.stdin.fileno())
             while True:
                 time.sleep(0.01)
-                if workflow.pages_shot != old_count:
-                    old_count = workflow.pages_shot
+                if len(workflow.pages) != old_count:
+                    old_count = len(workflow.pages)
                     refresh_stats()
                 if not data_available():
                     continue
@@ -266,23 +287,29 @@ def capture(config):
     workflow.finish_capture()
 
 
+def _update_callback(wf, changes):
+    if 'status' in changes and 'step_progress' in changes['status']:
+        draw_progress(changes['status']['step_progress'])
+
 def postprocess(config):
     path = config['path'].get()
-    workflow = Workflow(config=config, path=path)
+    workflow = spreads.workflow.Workflow(config=config, path=path)
     draw_progress(0.0)
-    workflow.on_step_progressed.connect(
-        lambda x, **kwargs: draw_progress(kwargs['progress']),
-        sender=workflow, weak=False)
+    spreads.workflow.on_modified.connect(_update_callback, sender=workflow,
+                                         weak=False)
     workflow.process()
 
 
 def output(config):
+    def update_callback(wf, changes):
+        if 'status' in changes and 'step_progress' in changes['status']:
+            draw_progress(changes['status']['step_progress'])
     path = config['path'].get()
-    workflow = Workflow(config=config, path=path)
+    workflow = spreads.workflow.Workflow(config=config, path=path)
     draw_progress(0)
-    workflow.on_step_progressed.connect(
-        lambda x, **kwargs: draw_progress(kwargs['progress']),
-        sender=workflow, weak=False)
+    spreads.workflow.on_modified.connect(_update_callback, sender=workflow,
+                                         weak=False)
+    workflow.process()
     workflow.output()
 
 
@@ -303,171 +330,3 @@ def wizard(config):
           "Generating output\n"
           "=================")
     output(config)
-
-
-def setup_parser(config):
-    plugins = plugin.get_plugins(*config["plugins"].get())
-    rootparser = argparse.ArgumentParser(
-        description="Scanning Tool for  DIY Book Scanner")
-    subparsers = rootparser.add_subparsers()
-    for key, option in config.templates['core'].iteritems():
-        try:
-            add_argument_from_template('core', key, option, rootparser)
-        except TypeError:
-            continue
-
-    wizard_parser = subparsers.add_parser(
-        'wizard', help="Interactive mode")
-    wizard_parser.add_argument(
-        "path", type=unicode, help="Project path")
-    wizard_parser.set_defaults(subcommand=wizard)
-
-    config_parser = subparsers.add_parser(
-        'configure', help="Perform initial configuration")
-    config_parser.set_defaults(subcommand=configure)
-
-    capture_parser = subparsers.add_parser(
-        'capture', help="Start the capturing workflow")
-    capture_parser.add_argument(
-        "path", type=unicode, help="Project path")
-    capture_parser.set_defaults(subcommand=capture)
-    # Add arguments from plugins
-    for parser in (capture_parser, wizard_parser):
-        ext_names = [
-            name for name, cls in plugins.iteritems()
-            if any(issubclass(cls, mixin) for mixin in
-                   (plugin.CaptureHooksMixin, plugin.TriggerHooksMixin))]
-        ext_names.append('driver')
-        for ext in ext_names:
-            for key, tmpl in config.templates.get(ext, {}).iteritems():
-                try:
-                    add_argument_from_template(ext, key, tmpl, parser)
-                except TypeError:
-                    continue
-
-    postprocess_parser = subparsers.add_parser(
-        'postprocess',
-        help="Postprocess scanned images.")
-    postprocess_parser.add_argument(
-        "path", type=unicode, help="Project path")
-    postprocess_parser.add_argument(
-        "--jobs", "-j", dest="jobs", type=int, default=None,
-        metavar="<int>", help="Number of concurrent processes")
-    postprocess_parser.set_defaults(subcommand=postprocess)
-    # Add arguments from plugins
-    for parser in (postprocess_parser, wizard_parser):
-        ext_names = [name for name, cls in plugins.iteritems()
-                     if issubclass(cls, plugin.ProcessHookMixin)]
-        for ext in ext_names:
-            for key, tmpl in config.templates.get(ext, {}).iteritems():
-                try:
-                    add_argument_from_template(ext, key, tmpl, parser)
-                except TypeError:
-                    continue
-
-    output_parser = subparsers.add_parser(
-        'output',
-        help="Generate output files.")
-    output_parser.add_argument(
-        "path", type=unicode, help="Project path")
-    output_parser.set_defaults(subcommand=output)
-    # Add arguments from plugins
-    for parser in (output_parser, wizard_parser):
-        ext_names = [name for name, cls in plugins.iteritems()
-                     if issubclass(cls, plugin.OutputHookMixin)]
-        for ext in ext_names:
-            for key, tmpl in config.templates.get(ext, {}).iteritems():
-                try:
-                    add_argument_from_template(ext, key, tmpl, parser)
-                except TypeError:
-                    continue
-
-    # Add custom subcommands from plugins
-    if config["plugins"].get():
-        classes = (cls for cls in plugins.values()
-                   if issubclass(cls, plugin.SubcommandHookMixin))
-        for cls in classes:
-            cls.add_command_parser(subparsers)
-    return rootparser
-
-
-def add_argument_from_template(extname, key, template, parser):
-    flag = "--{0}".format(key.replace('_', '-'))
-    default = (template.value
-               if not template.selectable
-               else template.value[0])
-    kwargs = {'help': ("{0} [default: {1}]"
-                       .format(template.docstring, default)),
-              'dest': "{0}{1}".format(extname, '.'+key if extname else key)}
-    if isinstance(template.value, basestring):
-        kwargs['type'] = unicode
-        kwargs['metavar'] = "<str>"
-    elif isinstance(template.value, bool):
-        kwargs['help'] = template.docstring
-        if template.value:
-            flag = "--no-{0}".format(key.replace('_', '-'))
-            kwargs['help'] = ("Disable {0}"
-                              .format(template.docstring.lower()))
-            kwargs['action'] = "store_false"
-        else:
-            kwargs['action'] = "store_true"
-    elif isinstance(template.value, float):
-        kwargs['type'] = float
-        kwargs['metavar'] = "<float>"
-    elif isinstance(template.value, int):
-        kwargs['type'] = int
-        kwargs['metavar'] = "<int>"
-    elif template.selectable:
-        kwargs['type'] = type(template.value[0])
-        kwargs['metavar'] = "<{0}>".format("/".join(template.value))
-        kwargs['choices'] = template.value
-    else:
-        raise TypeError("Unsupported option type")
-    parser.add_argument(flag, **kwargs)
-
-
-def main():
-    # Set to ERROR so we can see errors during plugin loading.
-    logging.basicConfig(loglevel=logging.ERROR)
-
-    config = Configuration()
-
-    parser = setup_parser(config)
-    args = parser.parse_args()
-    # Set configuration from parsed arguments
-    config.set_from_args(args)
-
-    loglevel = config['core']['loglevel'].as_choice({
-        'none':     logging.NOTSET,
-        'info':     logging.INFO,
-        'debug':    logging.DEBUG,
-        'warning':  logging.WARNING,
-        'error':    logging.ERROR,
-        'critical': logging.CRITICAL,
-    })
-
-    # Set up logger
-    logger = logging.getLogger()
-    if logger.handlers:
-        for handler in logger.handlers:
-            logger.removeHandler(handler)
-    stdout_handler = ColourStreamHandler()
-    stdout_handler.setLevel(logging.DEBUG if config['core']['verbose'].get()
-                            else logging.WARNING)
-    stdout_handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
-    logger.addHandler(stdout_handler)
-    logger.addHandler(EventHandler())
-    if 'logfile' in config.keys():
-        logfile = Path(config['core']['logfile'].as_filename())
-        if not logfile.parent.exists():
-            logfile.parent.mkdir()
-        file_handler = logging.handlers.RotatingFileHandler(
-            filename=unicode(logfile), maxBytes=512*1024, backupCount=1)
-        file_handler.setFormatter(logging.Formatter(
-            "%(asctime)s %(message)s [%(name)s] [%(levelname)s]"))
-        file_handler.setLevel(loglevel)
-        logger.addHandler(file_handler)
-
-    logger.setLevel(logging.DEBUG)
-
-    args.subcommand(config)

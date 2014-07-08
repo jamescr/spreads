@@ -20,6 +20,7 @@ from __future__ import division, unicode_literals
 import logging
 import math
 import multiprocessing
+import platform
 import re
 import shutil
 import subprocess
@@ -32,12 +33,15 @@ from spreads.vendor.pathlib import Path
 
 from spreads.config import OptionTemplate
 from spreads.plugin import HookPlugin, ProcessHookMixin
-from spreads.util import find_in_path, MissingDependencyException
+from spreads.util import (find_in_path, MissingDependencyException,
+                          SpreadsException, wildcardify)
 
 if not find_in_path('scantailor-cli'):
     raise MissingDependencyException("Could not find executable"
-                                     " `scantailor-cli` in $PATH. Please"
-                                     " install the appropriate package(s)!")
+                                     " `scantailor-cli`. Please" " install the"
+                                     " appropriate package(s)!")
+
+IS_WIN = platform.system() == 'Windows'
 
 logger = logging.getLogger('spreadsplug.scantailor')
 
@@ -48,7 +52,7 @@ class ScanTailorPlugin(HookPlugin, ProcessHookMixin):
     @classmethod
     def configuration_template(cls):
         conf = {
-            'autopilot': OptionTemplate(value=False,
+            'autopilot': OptionTemplate(value=True,
                                         docstring="Skip manual correction"),
             'rotate': OptionTemplate(value=False, docstring="Rotate pages"),
             'split_pages': OptionTemplate(value=True,
@@ -69,20 +73,18 @@ class ScanTailorPlugin(HookPlugin, ProcessHookMixin):
     def __init__(self, config):
         super(ScanTailorPlugin, self).__init__(config)
         self._enhanced = bool(re.match(r".*<images\|directory\|->.*",
-                              subprocess.check_output('scantailor-cli')
+                              subprocess.check_output(
+                                  find_in_path('scantailor-cli'))
                               .splitlines()[7]))
 
-    def _generate_configuration(self, projectfile, img_dir, out_dir):
-        if not out_dir.exists():
-            out_dir.mkdir()
-        logger.info("Generating ScanTailor configuration")
+    def _generate_configuration(self, in_paths, projectfile, out_dir):
         filterconf = [self.config[x].get(bool)
                       for x in ('rotate', 'split_pages', 'deskew', 'content',
                                 'auto_margins')]
         start_filter = filterconf.index(True)+1
         end_filter = len(filterconf) - list(reversed(filterconf)).index(True)
         marginconf = self.config['margins'].as_str_seq()
-        generation_cmd = ['scantailor-cli',
+        generation_cmd = [find_in_path('scantailor-cli'),
                           '--start-filter={0}'.format(start_filter),
                           '--end-filter={0}'.format(end_filter),
                           '--layout=1.5',
@@ -101,37 +103,44 @@ class ScanTailorPlugin(HookPlugin, ProcessHookMixin):
                 '--margins-bottom={0}'.format(marginconf[2]),
                 '--margins-left={0}'.format(marginconf[3]),
             ])
-        if self._enhanced:
-            generation_cmd.append(unicode(img_dir))
+        # NOTE: We cannot pass individual filenames on windows, since we have
+        # a limit of 32,768 characters for commands. Thus, we first try to
+        # find a wildcard for our paths that matches only them, and if that
+        # fails, throw an Exception and tell the user to use a proper OS...
+        wildcard = wildcardify(in_paths)
+        if not wildcard and IS_WIN:
+            raise SpreadsException("Please use a proper operating system.")
+        elif not wildcard:
+            generation_cmd.extend(in_paths)
         else:
-            generation_cmd.extend([unicode(x)
-                                   for x in sorted(img_dir.iterdir())])
+            generation_cmd.append(wildcard)
+
         generation_cmd.append(unicode(out_dir))
         logger.debug(" ".join(generation_cmd))
         proc = psutil.Process(subprocess.Popen(generation_cmd).pid)
 
-        num_images = sum(1 for x in img_dir.iterdir())
-        num_steps = end_filter - start_filter
-        last_filenum = 0
-        recent_filenum = 0
+        num_images = len(in_paths)
+        num_steps = (end_filter - start_filter)+1
+        last_fileidx = 0
+        recent_fileidx = 0
         finished_steps = 0
         while proc.is_running():
             try:
-                recent_filenum = next(int(Path(x.path).name.split('.')[0])
+                recent_fileidx = next(in_paths.index(x.path)
                                       for x in proc.open_files()
-                                      if unicode(img_dir) in x.path)
+                                      if x.path in in_paths)
             except StopIteration:
                 pass
             except psutil.AccessDenied:
                 # This means the process is no longer running
                 break
-            if recent_filenum == last_filenum:
-                time.sleep(.1)
+            if recent_fileidx == last_fileidx:
+                time.sleep(.01)
                 continue
-            if recent_filenum < last_filenum:
+            if recent_fileidx < last_fileidx:
                 finished_steps += 1
-            last_filenum = recent_filenum
-            progress = 0.5*((finished_steps*num_images+last_filenum) /
+            last_fileidx = recent_fileidx
+            progress = 0.5*((finished_steps*num_images+last_fileidx) /
                             float(num_steps*num_images))
             self.on_progressed.send(self, progress=progress)
 
@@ -167,40 +176,76 @@ class ScanTailorPlugin(HookPlugin, ProcessHookMixin):
         temp_dir = Path(tempfile.mkdtemp(prefix="spreads."))
         split_config = self._split_configuration(projectfile, temp_dir)
         logger.debug("Launching those subprocesses!")
-        processes = [subprocess.Popen(['scantailor-cli', '--start-filter=6',
-                                       unicode(cfgfile), unicode(out_dir)])
+        processes = [subprocess.Popen([find_in_path('scantailor-cli'),
+                                       '--start-filter=6', unicode(cfgfile),
+                                       unicode(out_dir)])
                      for cfgfile in split_config]
 
         last_count = 0
         while processes:
             recent_count = sum(1 for x in out_dir.glob('*.tif'))
             if recent_count > last_count:
-                self.on_progressed.send(
-                    self, progress=0.5+(float(recent_count)/num_pages)/2)
+                progress = 0.5 + (float(recent_count)/num_pages)/2
+                self.on_progressed.send(self, progress=progress)
+                last_count = recent_count
             for p in processes[:]:
                 if p.poll() is not None:
                     processes.remove(p)
+            time.sleep(.01)
         shutil.rmtree(unicode(temp_dir))
 
-    def process(self, path):
+    def process(self, pages, target_path):
         autopilot = self.config['autopilot'].get(bool)
         if not autopilot and not find_in_path('scantailor'):
             raise MissingDependencyException(
                 "Could not find executable `scantailor` in"
                 " $PATH. Please install the appropriate"
                 " package(s)!")
-        projectfile = path / "{0}.ScanTailor".format(path.name)
-        img_dir = path / 'raw'
-        out_dir = path / 'done'
 
-        if not projectfile.exists():
-            self._generate_configuration(projectfile, img_dir, out_dir)
+        # Create temporary files/directories
+        projectfile = Path(tempfile.mkstemp(suffix='.ScanTailor')[1])
+        out_dir = Path(tempfile.mkdtemp(prefix='st-out'))
+
+        # Map input paths to their pages so we can more easily associate
+        # the generated output files with their pages later on
+        in_paths = {}
+        for page in pages:
+            fpath = page.get_latest_processed(image_only=True)
+            if fpath is None:
+                fpath = page.raw_image
+            in_paths[unicode(fpath)] = page
+
+        logger.info("Generating ScanTailor configuration")
+        self._generate_configuration(sorted(in_paths.keys()),
+                                     projectfile, out_dir)
 
         if not autopilot:
+            logger.warn("If you are changing output settings (in the last "
+                        "step, you *have* to run the last step from the GUI. "
+                        "Due to a bug in ScanTailor, your settings would "
+                        "otherwise be ignored.")
+            time.sleep(5)
             logger.info("Opening ScanTailor GUI for manual adjustment")
-            subprocess.call(['scantailor', unicode(projectfile)])
-        logger.info("Generating output images from ScanTailor configuration.")
+            subprocess.call([find_in_path('scantailor'), unicode(projectfile)])
+        # Check if the user already generated output files from the GUI
+        if not sum(1 for x in out_dir.glob('*.tif')) == len(pages):
+            logger.info("Generating output images from ScanTailor "
+                        "configuration.")
+            self._generate_output(projectfile, out_dir, len(pages))
 
-        num_pages = sum(1 for x in img_dir.iterdir()
-                        if x.suffix.lower() in ('.jpeg', '.jpg'))
-        self._generate_output(projectfile, out_dir, num_pages)
+        # Associate generated output files with our pages
+        for fname in out_dir.glob('*.tif'):
+            out_stem = fname.stem
+            for in_path, page in in_paths.iteritems():
+                if Path(in_path).stem == out_stem:
+                    target_fname = target_path/fname.name
+                    shutil.copyfile(unicode(fname), unicode(target_fname))
+                    page.processed_images[self.__name__] = target_fname
+                    break
+            else:
+                logger.warn("Could not find page for output file {0}"
+                            .format(fname))
+
+        # Remove temporary files/directories
+        shutil.rmtree(unicode(out_dir))
+        projectfile.unlink()

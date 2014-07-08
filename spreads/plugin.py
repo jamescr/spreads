@@ -25,16 +25,19 @@ import pkg_resources
 from blinker import Namespace
 
 from spreads.config import OptionTemplate
-from spreads.util import abstractclassmethod, DeviceException
+from spreads.util import (abstractclassmethod, DeviceException,
+                          MissingDependencyException)
 
 
 logger = logging.getLogger("spreads.plugin")
 devices = None
-extensions = None
+extensions = dict()
 
 
 class ExtensionException(Exception):
-    pass
+    def __init__(self, message=None, extension=None):
+        super(ExtensionException, self).__init__(message)
+        self.extension = extension
 
 
 class SpreadsPlugin(object):  # pragma: no cover
@@ -196,6 +199,15 @@ class DevicePlugin(SpreadsPlugin):  # pragma: no cover
         """
         raise NotImplementedError
 
+    @abc.abstractmethod
+    def update_configuration(self, updated):
+        """ Update the device configuration.
+
+        :param updated:     Updated configuration values
+        :type updated:      dict
+        """
+        raise NotImplementedError
+
 
 class HookPlugin(SpreadsPlugin):
     """ Base class for HookPlugins.
@@ -211,7 +223,7 @@ class SubcommandHookMixin(object):
     __metaclass__ = abc.ABCMeta
 
     @abstractclassmethod
-    def add_command_parser(cls, rootparser):
+    def add_command_parser(cls, rootparser, config):
         """ Allows a plugin to register a new command with the command-line
             parser. The subparser that is added to :param rootparser: should
             set the class' ``__call__`` method as the ``func`` (via
@@ -221,6 +233,8 @@ class SubcommandHookMixin(object):
         :param rootparser: The root parser that this plugin should add a
                            subparser to.
         :type rootparser:  argparse.ArgumentParser
+        :param config:     The application configuration
+        :type config:      Configuration
 
         """
         pass
@@ -293,19 +307,14 @@ class ProcessHookMixin(object):
     __metaclass__ = abc.ABCMeta
 
     @abc.abstractmethod
-    def process(self, path):
+    def process(self, pages, target_path):
         """ Perform one or more actions that either modify the captured images
             or generate a different output.
 
-        .. note:
-            This method is intended to operate on the *done* subdfolder of
-            the project directory. At the beginning of postprocessing, it
-            will contain copies of the images in *raw*. This is to ensure that
-            a copy of the original, scanned images will always be available
-            for archival purposes.
-
-        :param path:        Project path
-        :type path:         pathlib.Path
+        :param pages:       Pages to be processed
+        :type pages:        list of Page objects
+        :param target_path: Target directory for processed files
+        :type target_path:  pathlib.Path
 
         """
         pass
@@ -315,32 +324,33 @@ class OutputHookMixin(object):
     __metaclass__ = abc.ABCMeta
 
     @abc.abstractmethod
-    def output(self, path):
-        """ Assemble an output file from the postprocessed images.
+    def output(self, pages, target_path, metadata, table_of_contents):
+        """ Assemble an output file from the pages.
 
-        .. note:
-            This method is intended to take its input files from the *done*
-            subfolder of the project path and store its output in the
-            *out* subfolder.
-
-        :param path:        Project path
-        :type path:         pathlib.Path
+        :param pages:       Project path
+        :type pages:        list of Page objects
+        :param target_path: Target directory for processed files
+        :type target_path:  pathlib.Path
+        :param metadata:    Metadata for workflow
+        :type metadata:     bagit.BagInfo
+        :param table_of_contents: Table of Contents for workflow
+        :type table_of_contents: list(TocEntry)
 
         """
         pass
 
 
 def available_plugins():
-    return [ext.name
-            for ext in pkg_resources.iter_entry_points('spreadsplug.hooks')]
+    return sorted([ext.name for ext in
+                   pkg_resources.iter_entry_points('spreadsplug.hooks')])
 
 
 def get_plugins(*names):
     global extensions
-    if extensions is None:
-        extensions = OrderedDict()
+    plugins = OrderedDict()
     for name in names:
         if name in extensions:
+            plugins[name] = extensions[name]
             continue
         try:
             logger.debug("Looking for extension \"{0}\"".format(name))
@@ -348,14 +358,20 @@ def get_plugins(*names):
                                                        name=name))
         except StopIteration:
             raise ExtensionException("Could not locate extension '{0}'"
-                                     .format(name))
+                                     .format(name), name)
         try:
-            extensions[name] = ext.load()
+            plugin = ext.load()
+            plugins[name] = plugin
+            extensions[name] = plugin
         except ImportError as err:
             raise ExtensionException(
-                "Missing dependency for extension '{0}': {1}"
-                .format(name, err.message[16:]))
-    return extensions
+                "Missing Python dependency for extension '{0}': {1}"
+                .format(name, err.message[16:]), name)
+        except MissingDependencyException as err:
+            raise ExtensionException(
+                "Error while locating external application dependency for "
+                "extension '{0}':\n{1}".format(err.message, name))
+    return plugins
 
 
 def available_drivers():
@@ -369,13 +385,13 @@ def get_driver(driver_name):
                                                    name=driver_name))
     except StopIteration:
         raise ExtensionException("Could not locate driver '{0}'"
-                                 .format(driver_name))
+                                 .format(driver_name), driver_name)
     try:
         return ext.load()
     except ImportError as err:
         raise ExtensionException(
             "Missing dependency for driver '{0}': {1}"
-            .format(driver_name, err.message[16:]))
+            .format(driver_name, err.message[16:]), driver_name)
 
 
 def get_devices(config, force_reload=False):

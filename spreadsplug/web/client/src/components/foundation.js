@@ -32,7 +32,11 @@
    */
   row =  React.createClass({
     render: function() {
-      return this.transferPropsTo(<div className="row">{this.props.children}</div>);
+      var classes = classSet({
+        'row': true,
+        'collapse': this.props.collapse
+      });
+      return this.transferPropsTo(<div className={classes}>{this.props.children}</div>);
     }
   });
 
@@ -86,9 +90,9 @@
       });
       classes += " " + this.props.size;
       return (this.transferPropsTo(
-          <button onClick={this.props.callback} className={classes}>
+          <a onClick={this.props.callback} className={classes}>
               {this.props.children}
-          </button>));
+          </a>));
     }
   });
 
@@ -214,11 +218,17 @@
    * @property {React.Component[]} children - Child components
    */
   modal = React.createClass({
+    getDefaultProps: function() {
+      return {
+        small: true
+      };
+    },
     render: function() {
       var classes = classSet({
         'reveal-modal': true,
         'open': true,
-        'fixed': this.props.fixed
+        'fixed': this.props.fixed,
+        'small': this.props.small
       });
       return (
         <div className={classes}

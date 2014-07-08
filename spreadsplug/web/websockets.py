@@ -38,13 +38,14 @@ class SocketHandler(websocket.WebSocketHandler):
 
 
 class WebSocketServer(threading.Thread):
-    def __init__(self, port=5001):
+    def __init__(self, port):
         super(WebSocketServer, self).__init__()
         app = web.Application([
             (r'/', SocketHandler),
         ])
         app.listen(port)
         self._loop = ioloop.IOLoop.instance()
+        self._lock = threading.Lock()
 
     def stop(self):
         self._loop.stop()
@@ -56,4 +57,9 @@ class WebSocketServer(threading.Thread):
     def send_event(self, event):
         data = json.dumps(event, cls=CustomJSONEncoder)
         for sock in SocketHandler.clients:
-            sock.write_message(data)
+            # NOTE: The lock is neccessary since Tornado is not thread-safe.
+            #       This should be obvious to anyone only vaguely familiar with
+            #       it, but it cost me quite a bit of debugging time to find
+            #       out :-)
+            with self._lock:
+                sock.write_message(data)

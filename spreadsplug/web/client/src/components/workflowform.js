@@ -23,7 +23,7 @@
       _ = require('underscore'),
       merge = require('react/lib/merge'),
       foundation = require('./foundation.js'),
-      ModelMixin = require('../../lib/backbonemixin.js'),
+      ModelMixin = require('../../vendor/backbonemixin.js'),
       PluginConfiguration = require('./config.js').PluginConfiguration,
       row = foundation.row,
       column = foundation.column,
@@ -58,8 +58,6 @@
         this.setState({errors: errors});
       }, this);
       /* When workflow is saved, add it to the `workflows` collection. */
-      // TODO: Check that the workflow is not already in the collection
-      //       (happens when editing an existing workflow)
       if (this.props.isNew) {
         this.props.workflow.on('sync', function() {
             this.props.workflow.collection.add(this.props.workflow);
@@ -70,10 +68,10 @@
       /* Deregister event handlers */
       this.props.workflow.off('all', null, this);
     },
-    handleSubmit: function() {
+    handleSave: function() {
       /* Save workflow and open capture screen when successful */
       this.setState({submitting: true});
-      var rv = this.props.workflow.save();
+      var rv = this.props.workflow.save({wait: true});
       if (!rv) {
         this.setState({submitting: false});
         return;
@@ -81,7 +79,7 @@
       rv.success(function(workflow) {
           var route;
           if (this.props.isNew) {
-            route = '/workflow/' + workflow.id + '/capture';
+            route = '/workflow/' + this.props.workflow.get('slug') + '/capture';
           } else {
             route = '/';
           }
@@ -98,7 +96,7 @@
     render: function() {
       return (
         <section>
-          <form onSubmit={this.handleSubmit}>
+          <form onSubmit={this.handleSave}>
             <row>
                 <column size='12'>
                 <h2>{this.props.isNew ?
@@ -117,12 +115,13 @@
                 </column>
             </row>
             <PluginConfiguration workflow={this.props.workflow}
-                                errors={this.state.errors} />
+                                 errors={this.state.errors}
+                                 templates={window.pluginTemplates}/>
             <row>
                 <column size='12'>
-                <fnButton onClick={this.handleSubmit} size="small" disabled={this.state.submitting}>
-                    <i className="fi-check"/> Submit
-                </fnButton>
+                  <button className={"action-button small" + (this.state.submitting ? 'disabled' : '')}>
+                    <i className="fa fa-check"/> Submit
+                  </button>
                 </column>
             </row>
           </form>

@@ -34,17 +34,22 @@ class OptionTemplate(object):
                       a list or tuple of acceptable values for this option,
                       with the first member being the default selection.
     :type selectable: bool
+    :attr advanced:   Whether the option is an advanced option
+    :type advanced:   bool
     """
 
-    def __init__(self, value, docstring=None, selectable=False):
+    def __init__(self, value, docstring=None, selectable=False,
+                 advanced=False):
         self.value = value
         self.docstring = docstring
         self.selectable = selectable
+        self.advanced = advanced
 
     def __repr__(self):
-        return ("OptionTemplate(value={0}, docstring={1}, selectable={2})"
+        return ("OptionTemplate(value={0}, docstring={1}, selectable={2}"
+                " advanced={3})"
                 .format(repr(self.value), repr(self.docstring),
-                        repr(self.selectable)))
+                        repr(self.selectable), repr(self.advanced)))
 
 
 CORE_OPTIONS = {
@@ -64,7 +69,7 @@ CORE_OPTIONS = {
 
 class Configuration(object):
     def __init__(self, appname='spreads'):
-        self._config = confit.LazyConfig(appname, __name__)
+        self._config = confit.Configuration(appname, __name__)
         self._config.read()
         if 'plugins' not in self._config.keys():
             self['plugins'] = []
@@ -81,8 +86,8 @@ class Configuration(object):
     def keys(self):
         return self._config.keys()
 
-    def dump(self, filename=None, full=True):
-        return self._config.dump(unicode(filename), full)
+    def dump(self, filename=None, full=True, sections=None):
+        return self._config.dump(unicode(filename), full, sections)
 
     def flatten(self):
         return self._config.flatten()
@@ -101,11 +106,11 @@ class Configuration(object):
             driver_name = self["driver"].get()
             templates['device'] = (spreads.plugin.get_driver(driver_name)
                                    .configuration_template())
-            plugins = spreads.plugin.get_plugins(*self["plugins"].get())
-            for name, plugin in plugins.iteritems():
-                tmpl = plugin.configuration_template()
-                if tmpl:
-                    templates[name] = tmpl
+        plugins = spreads.plugin.get_plugins(*self["plugins"].get())
+        for name, plugin in plugins.iteritems():
+            tmpl = plugin.configuration_template()
+            if tmpl:
+                templates[name] = tmpl
         return templates
 
     @property
@@ -146,15 +151,18 @@ class Configuration(object):
         :param overwrite: Whether to overwrite already existing values
 
         """
+        old_settings = self[section].flatten()
+        settings = copy.deepcopy(old_settings)
         for key, option in template.iteritems():
             logging.info("Adding setting {0} from {1}"
                          .format(key, section))
-            if not overwrite and key in self[section].keys():
+            if not overwrite and key in old_settings:
                 continue
             if option.selectable:
-                self[section][key] = option.value[0]
+                settings[key] = option.value[0]
             else:
-                self[section][key] = option.value
+                settings[key] = option.value
+        self[section].set(settings)
 
     def set_from_args(self, args):
         """ Apply settings from parsed arguments.

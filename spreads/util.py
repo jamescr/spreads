@@ -21,12 +21,19 @@
 from __future__ import division, unicode_literals
 
 import abc
-import itertools
+import glob
+import json
 import logging
 import os
+import platform
+import re
+from unicodedata import normalize
 
 import blinker
+import psutil
+import roman
 from colorama import Fore, Back, Style
+from spreads.vendor.pathlib import Path
 
 
 class SpreadsException(Exception):
@@ -46,12 +53,37 @@ def find_in_path(name):
 
     :param name:  name of the executable
     :type name:   unicode
-    :returns:     bool -- True if *name* is found or False
+    :returns:     unicode -- Path to executable or None if not found
 
     """
-    return name in itertools.chain(*tuple(os.listdir(x)
-                                   for x in os.environ.get('PATH').split(':')
-                                   if os.path.exists(x)))
+    candidates = None
+    if platform.system() == "Windows":
+        import _winreg
+        if name.startswith('scantailor'):
+            try:
+                cmd = _winreg.QueryValue(
+                    _winreg.HKEY_CLASSES_ROOT,
+                    'Scan Tailor Project\\shell\\open\\command')
+                bin_path = cmd.split('" "')[0][1:]
+                if name.endswith('-cli'):
+                    bin_path = bin_path[:-4] + "-cli.exe"
+                return bin_path if os.path.exists(bin_path) else None
+            except OSError:
+                return None
+        else:
+            path_dirs = os.environ.get('PATH').split(';')
+            path_dirs.append(os.getcwd())
+            path_exts = os.environ.get('PATHEXT').split(';')
+            candidates = (os.path.join(p, name + e)
+                          for p in path_dirs
+                          for e in path_exts)
+    else:
+        candidates = (os.path.join(p, name)
+                      for p in os.environ.get('PATH').split(':'))
+    try:
+        return next(c for c in candidates if os.path.exists(c))
+    except StopIteration:
+        return None
 
 
 def check_futures_exceptions(futures):
@@ -61,9 +93,56 @@ def check_futures_exceptions(futures):
 
 
 def get_free_space(path):
-    # TODO: Add path for windows
-    st = os.statvfs(unicode(path))
-    return (st.f_bavail * st.f_frsize)
+    return psutil.disk_usage(unicode(path)).free
+
+
+def wildcardify(pathnames):
+    """ Generate a single path with wildcards that matches all `pathnames`.
+    
+    :param pathnames:   List of pathnames to find a wildcard string for
+    :type pathanmes:    List of str/unicode
+    :return:            The wildcard string or None if none was found
+    :rtype:             unicode or None
+    """
+    wildcard_str = ""
+    for idx, char in enumerate(pathnames[0]):
+        if all(p[idx] == char for p in pathnames[1:]):
+            wildcard_str += char
+        elif not wildcard_str or wildcard_str[-1] != "*":
+            wildcard_str += "*"
+    matched_paths = glob.glob(wildcard_str)
+    if not sorted(pathnames) == sorted(matched_paths):
+        return None
+    return wildcard_str
+
+
+PUNCTUATION_REXP = re.compile(r'[\t !"#$%&\'()*\-/<=>?@\[\\\]^_`{|},.]+')
+def slugify(text, delimiter=u'-'):
+    """Generates an ASCII-only slug.
+
+    Code adapted from Flask snipped by Armin Ronacher:
+    http://flask.pocoo.org/snippets/5/
+
+    :param text:        Text to create slug for
+    :type text:         unicode
+    :param delimiter:   Delimiter to use in slug
+    :type delimiter:    unicode
+    :return:            The generated slug
+    :rtype:             unicode
+    """
+    result = []
+    for word in PUNCTUATION_REXP.split(text.lower()):
+        word = normalize('NFKD', word).encode('ascii', 'ignore')
+        if word:
+            result.append(word)
+    return unicode(delimiter.join(result))
+
+
+def get_next(generator, default=None):
+    try:
+        return next(generator)
+    except StopIteration:
+        return default
 
 
 class _instancemethodwrapper(object):
@@ -167,3 +246,103 @@ class EventHandler(logging.Handler):
 
     def emit(self, record):
         self.on_log_emit.send(record=record)
+
+
+def get_data_dir(create=False):
+    UNIX_DIR_VAR = 'XDG_DATA_DIRS'
+    UNIX_DIR_FALLBACK = '~/.config'
+    WINDOWS_DIR_VAR = 'APPDATA'
+    WINDOWS_DIR_FALLBACK = '~\\AppData\\Roaming'
+    MAC_DIR = '~/Library/Application Support'
+    base_dir = None
+    if platform.system() == 'Darwin':
+        if Path(UNIX_DIR_FALLBACK).exists:
+            base_dir = UNIX_DIR_FALLBACK
+        else:
+            base_dir = MAC_DIR
+    elif platform.system() == 'Windows':
+        if WINDOWS_DIR_VAR in os.environ:
+            base_dir = os.environ[WINDOWS_DIR_VAR]
+        else:
+            base_dir = WINDOWS_DIR_FALLBACK
+    else:
+        if UNIX_DIR_VAR in os.environ:
+            base_dir = os.environ[UNIX_DIR_VAR]
+        else:
+            base_dir = UNIX_DIR_FALLBACK
+    app_path = Path(base_dir)/'spreads'
+    if create and not app_path.exists():
+        app_path.mkdir()
+    return unicode(app_path)
+
+
+class RomanNumeral(object):
+    @staticmethod
+    def is_roman(value):
+        return bool(roman.romanNumeralPattern.match(value))
+
+    def __init__(self, value, case='upper'):
+        self._val = self._to_int(value)
+        self._case = case
+        if isinstance(value, basestring) and not self.is_roman(value):
+            self._case = 'lower'
+        elif isinstance(value, RomanNumeral):
+            self._case = value._case
+
+    def _to_int(self, value):
+        if isinstance(value, int):
+            return value
+        elif isinstance(value, basestring) and self.is_roman(value.upper()):
+            return roman.fromRoman(value.upper())
+        elif isinstance(value, RomanNumeral):
+            return value._val
+        else:
+            raise ValueError("Value must be a valid roman numeral, a string"
+                             " representing one or an integer: '{0}'"
+                             .format(value))
+
+    def __cmp__(self, other):
+        if self._val > self._to_int(other):
+            return 1
+        elif self._val == self._to_int(other):
+            return 0
+        elif self._val < self._to_int(other):
+            return -1
+
+    def __add__(self, other):
+        return RomanNumeral(self._val + self._to_int(other), self._case)
+
+    def __sub__(self, other):
+        return RomanNumeral(self._val - self._to_int(other), self._case)
+
+    def __int__(self):
+        return self._val
+
+    def __str__(self):
+        strval = roman.toRoman(self._val)
+        if self._case == 'lower':
+            return strval.lower()
+        else:
+            return strval
+
+    def __unicode__(self):
+        return unicode(str(self))
+
+    def __repr__(self):
+        return str(self)
+
+
+class CustomJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if hasattr(obj, 'to_dict'):
+            return obj.to_dict()
+        if isinstance(obj, Path):
+            # Serialize paths that belong to a workflow as paths relative to
+            # its base directory
+            base = get_next(p for p in obj.parents
+                            if (p/'bagit.txt').exists())
+            if base:
+                return unicode(obj.relative_to(base))
+            else:
+                return unicode(obj)
+        return json.JSONEncoder.default(self, obj)

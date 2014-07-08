@@ -22,10 +22,9 @@
   var Backbone = require('backbone'),
       React = require('react/addons'),
       _ = require('underscore'),
-      jQuery = require('jquery'),
       SpreadsApp = require('./components/spreadsapp'),
       Workflows = require('./workflow.js'),
-      events = require('./events.js');
+      EventDispatcher = require('./events.js');
 
   /**
    * Application Router.
@@ -38,7 +37,7 @@
      * Sets up the application.
      */
     initialize: function() {
-      this.events = events;
+      this.events = new EventDispatcher();
 
       // Set up model collections
       this._workflows = new Workflows();
@@ -48,13 +47,13 @@
       this._workflows.fetch({async: false});
     },
     routes: {
-      "":                       "root",
-      "workflow/new":           "createWorkflow",
-      "workflow/:id":           "viewWorkflow",
-      "workflow/:id/edit":      "editWorkflow",
-      "workflow/:id/capture":   "startCapture",
-      "preferences":            "editPreferences",
-      "logging":                "displayLog"
+      "":                         "root",
+      "workflow/new":             "createWorkflow",
+      "workflow/:slug":           "viewWorkflow",
+      "workflow/:slug/edit":      "editWorkflow",
+      "workflow/:slug/capture":   "startCapture",
+      "workflow/:slug/submit":    "submitWorkflow",
+      "logging":                  "displayLog"
     },
     /**
      * Renders `SpreadsApp` component into `content` container and assigns
@@ -63,12 +62,12 @@
      *
      * @private
      * @param {string} view
-     * @param {?number} workflowId
+     * @param {?string} workflowSlug
      */
-    _renderView: function(view, workflowId) {
+    _renderView: function(view, workflowSlug) {
       React.renderComponent(<SpreadsApp view={view} workflows={this._workflows}
-                                        workflowId={workflowId} />,
-                            document.getElementById('content'));
+                                        workflowSlug={workflowSlug} />,
+                            document.body);
     },
     root: function() {
       this._renderView("root");
@@ -76,17 +75,17 @@
     createWorkflow: function() {
       this._renderView("create");
     },
-    viewWorkflow: function(workflowId) {
-      this._renderView("view", workflowId);
+    viewWorkflow: function(workflowSlug) {
+      this._renderView("view", workflowSlug);
     },
-    editWorkflow: function(workflowId) {
-      this._renderView("edit", workflowId);
+    editWorkflow: function(workflowSlug) {
+      this._renderView("edit", workflowSlug);
     },
-    startCapture: function(workflowId) {
-      this._renderView("capture", workflowId);
+    startCapture: function(workflowSlug) {
+      this._renderView("capture", workflowSlug);
     },
-    editPreferences: function() {
-      this._renderView("preferences");
+    submitWorkflow: function(workflowSlug) {
+      this._renderView("submit", workflowSlug);
     },
     displayLog: function() {
       this._renderView("log");

@@ -3,6 +3,7 @@ from contextlib import nested
 import mock
 import pytest
 import spreads.vendor.confit as confit
+from spreads.vendor.pathlib import Path
 
 import spreads.util as util
 import spreadsplug.dev.chdkcamera as chdkcamera
@@ -62,23 +63,48 @@ def test_configuration_template():
 @mock.patch('spreadsplug.dev.chdkcamera.CHDKCameraDevice._execute_lua')
 @mock.patch('spreadsplug.dev.chdkcamera.usb')
 def test_yield_devices(usb, lua, config):
-    match_cfg = mock.Mock()
+    # create some objects that simulates a device and its config
+    match_cfg = mock.MagicMock()
     match_cfg.bInterfaceClass = 0x6
     match_cfg.bInterfaceSubClass = 0x1
-    nomatch_cfg = mock.Mock()
+    match_cfg.__iter__.return_value = iter(match_cfg)
+    match_cfg.name = "match_cfg"
+    nomatch_cfg = mock.MagicMock()
     nomatch_cfg.bInterfaceClass = 0x3
     nomatch_cfg.bInterfaceSubClass = 0x3
-    mock_devs = [mock.Mock() for x in xrange(10)]
+    nomatch_cfg.__iter__.return_value = [nomatch_cfg]
+    nomatch_cfg.name = "nomatch_cfg"
+    mock_devs = [mock.MagicMock() for x in xrange(10)]
     for dev in mock_devs:
         dev.get_active_configuration.return_value = {(0, 0): nomatch_cfg}
-    mock_devs[-1].get_active_configuration.return_value = {(0, 0): match_cfg}
-    mock_devs[-1].bus, mock_devs[-1].address = 1, 1
-    mock_devs[-2].get_active_configuration.return_value = {(0, 0): match_cfg}
-    mock_devs[-2].bus, mock_devs[-2].address = 2, 1
-    usb.core.find.return_value = mock_devs
+        dev.__iter__.return_value = [nomatch_cfg]
+    m1, m2 = mock.MagicMock(), mock.MagicMock()
+    mock_devs.extend((m1, m2))
+    m1.get_active_configuration.return_value = {(0, 0): match_cfg}
+    m1.bus, m1.address = 1, 1
+    m2.get_active_configuration.return_value = {(0, 0): match_cfg}
+    m2.bus, m2.address = 2, 1
+    m1.__iter__.return_value = [match_cfg]
+    m2.__iter__.return_value = [match_cfg]
+
+    # reroute calls to pyusb into these functions
+    def newusb_find(find_all=False, backend=None, **args):
+        assert find_all is True
+        return [dev for dev in mock_devs if args["custom_match"](dev)]
+    usb.core.find.side_effect = newusb_find
+
+    def newusb_util_find(desc, **args):
+        match = (int(desc.bInterfaceClass) == args["bInterfaceClass"] and
+                 int(desc.bInterfaceSubClass) == args["bInterfaceSubClass"])
+        if match:
+            return desc
+    usb.util.find_descriptor.side_effect = newusb_util_find
+
+    # stage lua call and usb.util.get_string
     lua.return_value = {'build_revision': 3000}
     usb.util.get_string.side_effect = (b'12345678\x00\x00\x00',
                                        b'87654321\x00\x00\x00')
+    # test the class
     devs = list(chdkcamera.CHDKCameraDevice.yield_devices(config))
     assert len(devs) == 2
     assert devs[0]._serial_number == '12345678'
@@ -124,14 +150,14 @@ def test_set_target_page(write, camera):
 
 
 def test_prepare_capture(camera):
-    camera.prepare_capture('/tmp/foo')
+    camera.prepare_capture(Path('/tmp/foo.jpg'))
     camera._execute_lua.assert_any_call('enter_alt()')
     camera._run.assert_any_call('rec')
 
 
 def test_prepare_capture_withrec(camera):
     camera._run.side_effect = chdkcamera.CHDKPTPException()
-    camera.prepare_capture('/tmp/foo')
+    camera.prepare_capture(Path('/tmp/foo.jpg'))
     camera._execute_lua.assert_any_call('enter_alt()')
     camera._run.assert_any_call('rec')
 
@@ -151,9 +177,10 @@ def test_get_preview_image(mock_open, camera):
 @mock.patch('spreadsplug.dev.chdkcamera.JPEGImage')
 def test_capture(jpeg, camera):
     jpeg.return_value = mock.Mock()
-    camera.capture('/tmp/000')
+    camera.capture(Path('/tmp/000.jpg'))
     assert camera._run.call_count == 1
     assert camera._run.call_args_list[0][0][0].startswith('remoteshoot')
+    assert camera._run.call_args_list[0][0][0].endswith('"/tmp/000"')
     assert jpeg.called_once_with('/tmp/000.jpg')
     assert jpeg.return_value.exif_orientation == 6
     assert jpeg.return_value.save.called_once_with('/tmp/000.jpg')
@@ -163,9 +190,10 @@ def test_capture(jpeg, camera):
 def test_capture_raw(jpeg, camera):
     jpeg.return_value = mock.Mock()
     camera.config['shoot_raw'] = True
-    camera.capture('/tmp/000')
+    camera.capture(Path('/tmp/000.dng'))
     assert camera._run.call_count == 1
     assert "-dng " in camera._run.call_args_list[0][0][0]
+    assert camera._run.call_args_list[0][0][0].endswith('"/tmp/000"')
     assert jpeg.called_once_with('/tmp/000.dng')
 
 
@@ -174,7 +202,7 @@ def test_capture_noprepare(jpeg, camera):
     camera._run.side_effect = (
         chdkcamera.CHDKPTPException('dev not in rec mode'), None)
     with mock.patch.object(camera, 'prepare_capture') as prepare:
-        camera.capture('/tmp/000')
+        camera.capture(Path('/tmp/000.jpg'))
         assert prepare.call_count == 1
         assert camera._run.call_count == 2
 
@@ -183,7 +211,7 @@ def test_capture_noprepare(jpeg, camera):
 def test_capture_noremote(jpeg, camera):
     jpeg.return_value = mock.Mock()
     camera._can_remote = False
-    camera.capture('/tmp/000')
+    camera.capture(Path('/tmp/000.jpg'))
     assert camera._run.call_count == 1
     assert camera._run.call_args_list[0][0][0].startswith('shoot')
 
@@ -191,7 +219,7 @@ def test_capture_noremote(jpeg, camera):
 def test_capture_error(camera):
     camera._run.side_effect = chdkcamera.CHDKPTPException('foobar')
     with pytest.raises(chdkcamera.CHDKPTPException) as exc:
-        camera.capture('/tmp/000')
+        camera.capture(Path('/tmp/000.jpg'))
         assert exc is camera._run.side_effect
 
 
@@ -205,7 +233,7 @@ def test_run(sp, camera_nomock):
     sp.check_output.assert_called_with(
         [u'/tmp/chdkptp/chdkptp', '-c-d=002 -b=001', '-eset cli_verbose=2',
             '-efoobar'], env={'LUA_PATH': u'/tmp/chdkptp/lua/?.lua'},
-        stderr=sp.STDOUT)
+        stderr=sp.STDOUT, close_fds=True)
 
 
 @mock.patch('spreadsplug.dev.chdkcamera.subprocess')
@@ -270,9 +298,11 @@ def test_get_target_page_error(camera):
 
 def test_set_zoom(camera):
     camera._zoom_steps = 8
+    camera.config['zoom_level'] = 10
     with pytest.raises(ValueError):
-        camera._set_zoom(10)
-    camera._set_zoom(7)
+        camera._set_zoom()
+    camera.config['zoom_level'] = 7
+    camera._set_zoom()
     camera._execute_lua.assert_called_once_with("set_zoom(7)", wait=True)
 
 
@@ -297,25 +327,51 @@ def test_set_focus(sleep, camera):
 @mock.patch('spreadsplug.dev.chdkcamera.A2200._execute_lua')
 @mock.patch('spreadsplug.dev.chdkcamera.usb')
 def test_a2200_yield_devices(usb, lua, config):
-    match_cfg = mock.Mock()
+    # create some objects that simulates a device and its config
+    match_cfg = mock.MagicMock()
     match_cfg.bInterfaceClass = 0x6
     match_cfg.bInterfaceSubClass = 0x1
-    nomatch_cfg = mock.Mock()
+    match_cfg.__iter__.return_value = iter(match_cfg)
+    match_cfg.name = "match_cfg"
+    nomatch_cfg = mock.MagicMock()
     nomatch_cfg.bInterfaceClass = 0x3
     nomatch_cfg.bInterfaceSubClass = 0x3
-    mock_devs = [mock.Mock(idProduct=0xff, idVendor=0xff) for x in xrange(10)]
+    nomatch_cfg.__iter__.return_value = [nomatch_cfg]
+    nomatch_cfg.name = "nomatch_cfg"
+    mock_devs = [mock.MagicMock(idProduct=0xff, idVendor=0xff)
+                 for x in xrange(10)]
     for dev in mock_devs:
         dev.get_active_configuration.return_value = {(0, 0): nomatch_cfg}
-    mock_devs[-1].idProduct, mock_devs[-1].idVendor = 0x322a, 0x4a9
-    mock_devs[-1].bus, mock_devs[-1].address = 1, 1
-    mock_devs[-2].idProduct, mock_devs[-2].idVendor = 0x322a, 0x4a9
-    mock_devs[-2].bus, mock_devs[-2].address = 2, 1
-    for dev in mock_devs[-2:]:
-        dev.get_active_configuration.return_value = {(0, 0): match_cfg}
-    usb.core.find.return_value = mock_devs
+        dev.__iter__.return_value = [nomatch_cfg]
+    m1, m2 = mock.MagicMock(), mock.MagicMock()
+    mock_devs.extend((m1, m2))
+    m1.get_active_configuration.return_value = {(0, 0): match_cfg}
+    m1.bus, m1.address = 1, 1
+    m1.idProduct, m1.idVendor = 0x322a, 0x4a9
+    m2.get_active_configuration.return_value = {(0, 0): match_cfg}
+    m2.bus, m2.address = 2, 1
+    m2.idProduct, m2.idVendor = 0x322a, 0x4a9
+    m1.__iter__.return_value = [match_cfg]
+    m2.__iter__.return_value = [match_cfg]
+
+    # reroute calls to pyusb into these functions
+    def newusb_find(find_all=False, backend=None, **args):
+        assert find_all is True
+        return [dev for dev in mock_devs if args["custom_match"](dev)]
+    usb.core.find.side_effect = newusb_find
+
+    def newusb_util_find(desc, **args):
+        match = (int(desc.bInterfaceClass) == args["bInterfaceClass"] and
+                 int(desc.bInterfaceSubClass) == args["bInterfaceSubClass"])
+        if match:
+            return desc
+    usb.util.find_descriptor.side_effect = newusb_util_find
+
+    # stage lua call and usb.util.get_string
     lua.return_value = {'build_revision': 3000}
     usb.util.get_string.side_effect = (b'12345678\x00\x00\x00',
                                        b'87654321\x00\x00\x00')
+    # test the class
     devs = list(chdkcamera.CHDKCameraDevice.yield_devices(config))
     assert not any(not isinstance(dev, chdkcamera.A2200)
                    for dev in devs)
@@ -328,15 +384,3 @@ def test_a2200_finish_capture(a2200):
     with mock.patch.object(a2200, '_run') as run:
         a2200.finish_capture()
         assert run.call_count == 0
-
-
-def test_a2200_set_zoom(a2200):
-    a2200._zoom_steps = 8
-    with pytest.raises(ValueError):
-        a2200._set_zoom(10)
-    with mock.patch.object(a2200, '_execute_lua') as lua:
-        lua.return_value = 1
-        a2200._set_zoom(7)
-        lua.return_value = 8
-        a2200._set_zoom(7)
-        assert lua.call_count == 4
