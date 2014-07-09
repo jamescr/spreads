@@ -1,6 +1,7 @@
 # For canon digital camaras powershot A2300
 
-SUBSYSTEM=="usb", ACTION=="add", ATTR{idVendor}=="04a9", ATTR{idProduct}=="324a", MODE="0666"
+#SUBSYSTEM=="usb", ACTION=="add", ATTR{idVendor}=="04a9", ATTR{idProduct}=="324a", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="04a9", ATTR{idProduct}=="324a", MODE="0666"
 
 ## to be used with other models try using product and manufacturer 
 ## attributes instead of idVendor and idProduct. 
