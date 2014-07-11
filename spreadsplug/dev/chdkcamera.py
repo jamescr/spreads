@@ -330,6 +330,15 @@ class CHDKCameraDevice(DevicePlugin):
         # Check for possible CHDKPTP errors
         if any('ERROR' in x for x in output):
             raise CHDKPTPException("\n".join(output))
+        #Check for device status OK besides ptp_opensession failure
+        ERROR_ptp_opensession_failed = "open_camera_dev_usb: ptp_opensession failed 0x2ff"
+        if any(ERROR_ptp_opensession_failed in x for x in output):
+			if any('Device status OK' in x for x in output):
+				self.logger.warning("ptp_opensession error detected, but device status is OK.")
+				output = [x for x in output if not x.startswith('open_camera_dev_usb:')]
+				output = [x for x in output if not x.startswith('Device status OK')]
+			else:
+				raise CHDKPTPException("\n".join(output))
         return output
 
     def _execute_lua(self, script, wait=True, get_result=False, timeout=256):
